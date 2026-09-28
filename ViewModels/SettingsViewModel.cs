@@ -797,14 +797,16 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
     public record ManifestSourceOption(string Id, string DisplayName, string TestUrl, string? UserAgent = null);
 
     // 探针使用公开游戏的真实 manifest，使各上游走与内核一致的业务路径；
-    // 非法参数会导致部分上游返回业务错误而另一部分直接 502，将存活源误判为不可用
+    // 非法参数会导致部分上游返回业务错误而另一部分直接 502，将存活源误判为不可用；
+    // 列表顺序与内核 kProviders 表一致，即 failover 顺位（SDM 需 depotId+gid 双参数）
     public List<ManifestSourceOption> ManifestSourceOptions { get; } =
     [
         new("20770407", "20770407", "https://20770407.xyz/manifest/481/3183503801510301321"),
-        new("wudrm", "wudrm", "http://gmrc.wudrm.com/manifest/3183503801510301321"),
-        new("opensteamtool", "opensteamtool", "https://manifest.opensteamtool.com/3183503801510301321"),
-        new("steamrun", "steamrun", "https://manifest.steam.run/api/manifest/3183503801510301321"),
+        new("SDM", "SDM", "https://steamapi.993499094.xyz/manifest/481/3183503801510301321"),
         new("manifestdex", "manifestdex", "https://manifest.manifestdex.com/3183503801510301321", "ManifestDeX/1.0"),
+        new("wudrm", "wudrm", "http://gmrc.wudrm.com/manifest/3183503801510301321"),
+        new("steamrun", "steamrun", "https://manifest.steam.run/api/manifest/3183503801510301321"),
+        new("opensteamtool", "opensteamtool", "https://manifest.opensteamtool.com/3183503801510301321"),
     ];
 
     [ObservableProperty]

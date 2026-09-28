@@ -483,14 +483,6 @@ Style="{StaticResource SettingsCardStyle}">
                             </StackPanel>
                         </ui:SettingsCard>
 
-                        <ui:SettingsCard Header="失败时自动切换清单请求源" Margin="0,0,0,8"
-                                         Description="当前指定的上游清单源请求失败时，自动顺位使用别的源继续处理请求"
-                                         Style="{StaticResource SettingsCardStyle}">
-                            <ui:ToggleSwitch IsOn="{Binding ManifestFailoverEnabled}"
-                                             IsEnabled="{Binding IsManifestFailoverAvailable}"
-                                             OnContent="开" OffContent="关"/>
-                        </ui:SettingsCard>
-
                         <!-- 连通测试结果 -->
                         <Border CornerRadius="8" Background="{DynamicResource LayerFillColorDefaultBrush}"
                                 Margin="0,0,0,8" Padding="12,8"
@@ -516,6 +508,14 @@ Style="{StaticResource SettingsCardStyle}">
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
                         </Border>
+
+                        <ui:SettingsCard Header="失败时自动切换清单请求源" Margin="0,0,0,8"
+                                         Description="当前指定的上游清单源请求失败时，自动顺位使用别的源继续处理请求"
+                                         Style="{StaticResource SettingsCardStyle}">
+                            <ui:ToggleSwitch IsOn="{Binding ManifestFailoverEnabled}"
+                                             IsEnabled="{Binding IsManifestFailoverAvailable}"
+                                             OnContent="开" OffContent="关"/>
+                        </ui:SettingsCard>
 
                         <ui:SettingsCard Header="内核版本自动检测" Margin="0,0,0,8"
                                           Description="启动软件时自动检测配套内核是否有新版本，有更新时在主页顶部横幅提示"
