@@ -473,7 +473,7 @@ public class SteamPathService : ISteamPathService
         }
         catch (Exception ex)
         {
-            LogService.Warn("Steam路径", $"读取上游清单库配置失败: {ex.Message}");
+            LogService.Warn("Steam路径", $"读取上游清单源配置失败: {ex.Message}");
             return "20770407";
         }
     }
@@ -526,12 +526,107 @@ public class SteamPathService : ISteamPathService
             }
 
             _cachedConfigFile = null;
-            LogService.Info("Steam路径", $"上游清单库已切换为 {source}（{configFile}）");
+            LogService.Info("Steam路径", $"上游清单源已切换为 {source}（{configFile}）");
             return true;
         }
         catch (Exception ex)
         {
-            LogService.Error("Steam路径", $"写入上游清单库配置失败: {ex}");
+            LogService.Error("Steam路径", $"写入上游清单源配置失败: {ex}");
+            return false;
+        }
+    }
+
+    // 清单失败自动顺位：读 [manifest] failover 裸值，缺省 true（与内核默认一致）
+    public bool GetManifestFailoverEnabled()
+    {
+        try
+        {
+            var basePath = DetectSteamPathInternal();
+            if (string.IsNullOrEmpty(basePath)) return true;
+
+            var configFile = Path.Combine(basePath, ConfigFileName);
+            if (!File.Exists(configFile)) return true;
+
+            var lines = File.ReadAllLines(configFile);
+            var (sectionStart, sectionEnd) = FindTomlSection(lines, "manifest");
+            if (sectionStart < 0) return true;
+
+            foreach (var line in lines.Skip(sectionStart + 1).Take(sectionEnd - sectionStart - 1))
+            {
+                var value = ParseTomlBoolValue(line, "failover");
+                if (value != null) return value.Value;
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("Steam路径", $"读取清单失败顺位配置失败: {ex.Message}");
+            return true;
+        }
+    }
+
+    // 文本级改 [manifest] failover，与 SetCloudEnabled 同模式；内核热加载即时生效
+    public bool SetManifestFailoverEnabled(bool enabled)
+    {
+        try
+        {
+            var basePath = DetectSteamPathInternal();
+            if (string.IsNullOrEmpty(basePath)) return false;
+
+            var configFile = Path.Combine(basePath, ConfigFileName);
+            var newLine = $"failover = {(enabled ? "true" : "false")}";
+            List<string> lines;
+
+            if (!File.Exists(configFile))
+            {
+                lines = ["# 由 Fluent Steam Lua 写入，内核热加载即时生效", "", "[manifest]", newLine];
+            }
+            else
+            {
+                lines = File.ReadAllLines(configFile).ToList();
+                var (sectionStart, sectionEnd) = FindTomlSection(lines, "manifest");
+
+                if (sectionStart < 0)
+                {
+                    if (lines.Count > 0 && !string.IsNullOrWhiteSpace(lines[^1]))
+                        lines.Add(string.Empty);
+                    lines.Add("[manifest]");
+                    lines.Add(newLine);
+                }
+                else
+                {
+                    // 任意 failover 赋值行（合法与否）都整体替换，避免重复键
+                    var failoverLine = -1;
+                    for (var i = sectionStart + 1; i < sectionEnd; i++)
+                    {
+                        var t = lines[i].TrimStart();
+                        if (t.Length == 0 || t.StartsWith('#')) continue;
+                        if (!t.StartsWith("failover", StringComparison.OrdinalIgnoreCase)) continue;
+                        var rest = t.Substring("failover".Length).TrimStart();
+                        if (!rest.StartsWith('=')) continue;
+                        failoverLine = i;
+                        break;
+                    }
+
+                    if (failoverLine >= 0)
+                        lines[failoverLine] = newLine;
+                    else
+                        lines.Insert(sectionStart + 1, newLine);
+                }
+            }
+
+            // 原子落盘：崩溃只丢 tmp，不截断原文件（与 SetCloudEnabled 对齐）
+            var tmp = configFile + ".new";
+            File.WriteAllLines(tmp, lines);
+            File.Move(tmp, configFile, overwrite: true);
+
+            _cachedConfigFile = null;
+            LogService.Info("Steam路径", $"清单失败自动顺位已{(enabled ? "开启" : "关闭")}（{configFile}）");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("Steam路径", $"写入清单失败顺位配置失败: {ex}");
             return false;
         }
     }

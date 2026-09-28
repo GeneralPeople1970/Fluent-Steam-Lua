@@ -18,6 +18,8 @@ public interface ISteamPathService
     bool SetFriendBroadcastEnabled(bool enabled);
     string GetManifestSource();
     bool SetManifestSource(string source);
+    bool GetManifestFailoverEnabled();
+    bool SetManifestFailoverEnabled(bool enabled);
     bool GetCloudEnabled();
     bool SetCloudEnabled(bool enabled);
     string? GetCloudLibraryPath();

@@ -451,7 +451,7 @@ Style="{StaticResource SettingsCardStyle}">
                                     Margin="0,0,0,8"
                                     Message="该界面的内核设置仅在使用当前软件配套的内核（右下角工具栏里安装的 OST 内核）时才可用，其他内核不可用；需要使用这里的功能时，请在右下角重新安装配套内核（该内核为本软件作者维护的 OST 内核 fork 分支）"/>
 
-                        <ui:SettingsCard Header="上游清单库" Margin="0,0,0,8"
+                        <ui:SettingsCard Header="上游清单源" Margin="0,0,0,8"
                                           Description="切换内核请求的Manifest清单的上游数据源，切换前建议做连通性测试，内核热加载即时生效"
                                           Style="{StaticResource SettingsCardStyle}">
                             <StackPanel Orientation="Horizontal">
@@ -481,6 +481,14 @@ Style="{StaticResource SettingsCardStyle}">
                                     </ComboBox.Background>
                                 </ComboBox>
                             </StackPanel>
+                        </ui:SettingsCard>
+
+                        <ui:SettingsCard Header="失败时自动切换清单请求源" Margin="0,0,0,8"
+                                         Description="当前指定的上游清单源请求失败时，自动顺位使用别的源继续处理请求"
+                                         Style="{StaticResource SettingsCardStyle}">
+                            <ui:ToggleSwitch IsOn="{Binding ManifestFailoverEnabled}"
+                                             IsEnabled="{Binding IsManifestFailoverAvailable}"
+                                             OnContent="开" OffContent="关"/>
                         </ui:SettingsCard>
 
                         <!-- 连通测试结果 -->

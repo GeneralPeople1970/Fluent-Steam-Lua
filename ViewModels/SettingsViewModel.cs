@@ -143,6 +143,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
 
         RefreshFriendBroadcastToggle();
         RefreshManifestSource();
+        RefreshManifestFailoverToggle();
     }
 
     private void OnCdnAutoSwitched(int newIndex)
@@ -342,6 +343,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
                 _settingsService.Save(_settings);
                 RefreshFriendBroadcastToggle();
                 RefreshManifestSource();
+                RefreshManifestFailoverToggle();
                 StatusMessage = $"Steam路径已设置为: {dir}";
                 LogService.Info("设置", $"Steam路径已设置为: {dir}");
             }
@@ -358,6 +360,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         _settingsService.Save(_settings);
         RefreshFriendBroadcastToggle();
         RefreshManifestSource();
+        RefreshManifestFailoverToggle();
         StatusMessage = "已重置为自动检测路径";
         LogService.Info("设置", "已重置为自动检测路径");
     }
@@ -845,7 +848,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
             StatusMessage = "写入 opensteamtool.toml 失败，请检查文件权限";
             return;
         }
-        StatusMessage = $"上游清单库已切换为 {value}";
+        StatusMessage = $"上游清单源已切换为 {value}";
         LogService.Info("设置", StatusMessage);
     }
 
@@ -856,6 +859,42 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         finally { _syncingManifestSource = false; }
     }
 
+    [ObservableProperty]
+    private bool _manifestFailoverEnabled = true;
+
+    [ObservableProperty]
+    private bool _isManifestFailoverAvailable = true;
+
+    private bool _syncingManifestFailover;
+
+    // 开关唯一真相在内核 toml 里，我只做镜像显示；写失败要回拨，否则开关与文件不一致
+    partial void OnManifestFailoverEnabledChanged(bool value)
+    {
+        if (_syncingManifestFailover) return;
+        if (!_steamPathService.SetManifestFailoverEnabled(value))
+        {
+            _syncingManifestFailover = true;
+            try { ManifestFailoverEnabled = !value; }
+            finally { _syncingManifestFailover = false; }
+            StatusMessage = "写入 opensteamtool.toml 失败，请检查文件权限";
+            return;
+        }
+        StatusMessage = value ? "失败时自动切换清单请求源已开启" : "失败时自动切换清单请求源已关闭";
+        LogService.Info("设置", StatusMessage);
+    }
+
+    private void RefreshManifestFailoverToggle()
+    {
+        _syncingManifestFailover = true;
+        try
+        {
+            IsManifestFailoverAvailable =
+                !string.IsNullOrEmpty(_steamPathService.GetCustomPath() ?? _steamPathService.DetectSteamPath());
+            ManifestFailoverEnabled = _steamPathService.GetManifestFailoverEnabled();
+        }
+        finally { _syncingManifestFailover = false; }
+    }
+
     [RelayCommand]
     private async Task TestManifestSourceAsync()
     {
@@ -864,7 +903,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         ManifestTestResults.Clear();
         ManifestTestTotal = ManifestSourceOptions.Count;
         ManifestTestProgress = 0;
-        StatusMessage = "正在测试上游清单库连通性...";
+        StatusMessage = "正在测试上游清单源连通性...";
 
         try
         {
@@ -880,7 +919,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
 
             var reachable = results.Count(r => r.IsReachable);
             StatusMessage = $"连通性测试完成：{reachable}/{results.Length} 个可用";
-            LogService.Info("设置", $"上游清单库连通性测试：{string.Join(", ", results.Select(r => $"{r.DisplayName}={(r.IsReachable ? r.StatusCode.ToString() : r.FailReason)}({r.LatencyMs}ms)"))}");
+            LogService.Info("设置", $"上游清单源连通性测试：{string.Join(", ", results.Select(r => $"{r.DisplayName}={(r.IsReachable ? r.StatusCode.ToString() : r.FailReason)}({r.LatencyMs}ms)"))}");
         }
         finally
         {
