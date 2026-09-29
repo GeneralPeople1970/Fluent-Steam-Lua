@@ -6,7 +6,7 @@ namespace SteamLuaManager.Services;
 // 小黑盒国内搜索源：入库前置的名字搜索与 appid 精确补位优先走这里，
 // 搜不到再降级到现有国外链路。未公开接口，解析按缺字段即跳过处理。
 // 来源标注只写 app.log（LogService），不进窗口日志。
-public sealed record HeiHeGame(int AppId, string Name, string CoverUrl, List<string> CoverCandidates);
+public sealed record HeiHeGame(int AppId, string Name, string CoverUrl, List<string> CoverCandidates, string ReleaseDate = "");
 
 public static class XiaoHeiHeService
 {
@@ -60,7 +60,14 @@ public static class XiaoHeiHeService
                         covers.Add(u);
                 }
                 var follow = g.TryGetProperty("follow_num", out var f) && f.ValueKind == JsonValueKind.Number && f.TryGetInt32(out var fn) ? fn : 0;
-                scored.Add((new HeiHeGame(appId, name, covers[0], covers),
+                // 发售日期展示用：release_date 已是中文可读格式，缺失退到 release_date_desc；
+                // 非字符串类型直接丢弃（GetString 对数字会抛异常）
+                var release = g.TryGetProperty("release_date", out var rd) && rd.ValueKind == JsonValueKind.String
+                    ? rd.GetString() ?? "" : "";
+                if (string.IsNullOrWhiteSpace(release))
+                    release = g.TryGetProperty("release_date_desc", out var rdd) && rdd.ValueKind == JsonValueKind.String
+                        ? rdd.GetString() ?? "" : "";
+                scored.Add((new HeiHeGame(appId, name, covers[0], covers, release.Trim()),
                     Norm(name).Contains(normKeyword, StringComparison.Ordinal),
                     type == "game", follow));
             }
@@ -91,8 +98,8 @@ public static class XiaoHeiHeService
         return result;
     }
 
-    // appid 精确补位：只补中文名与封面；result 为空对象判 miss
-    public static async Task<(string? Name, string? CoverUrl)> GetGameDetailAsync(int appId, CancellationToken ct = default)
+    // appid 精确补位：只补中文名、封面与发售日期；result 为空对象判 miss
+    public static async Task<(string? Name, string? CoverUrl, string ReleaseDate)> GetGameDetailAsync(int appId, CancellationToken ct = default)
     {
         try
         {
@@ -100,7 +107,7 @@ public static class XiaoHeiHeService
             if (!resp.IsSuccessStatusCode)
             {
                 LogService.Warn("入库", $"小黑盒详情失败 AppID {appId}（HTTP {(int)resp.StatusCode}）");
-                return (null, null);
+                return (null, null, "");
             }
             using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
             if (!doc.RootElement.TryGetProperty("result", out var r) ||
@@ -108,17 +115,19 @@ public static class XiaoHeiHeService
                 !r.TryGetProperty("name", out var n))
             {
                 LogService.Info("入库", $"小黑盒详情无数据 AppID {appId}，转备用源");
-                return (null, null);
+                return (null, null, "");
             }
             var name = n.GetString();
             if (string.IsNullOrWhiteSpace(name))
             {
                 LogService.Info("入库", $"小黑盒详情无数据 AppID {appId}，转备用源");
-                return (null, null);
+                return (null, null, "");
             }
             var cover = r.TryGetProperty("image", out var img) ? img.GetString() : null;
+            var release = r.TryGetProperty("release_date", out var rd) && rd.ValueKind == JsonValueKind.String
+                ? rd.GetString() ?? "" : "";
             LogService.Info("入库", $"小黑盒详情补到名称 AppID {appId}：{name}");
-            return (name, string.IsNullOrWhiteSpace(cover) ? null : cover);
+            return (name, string.IsNullOrWhiteSpace(cover) ? null : cover, release.Trim());
         }
         catch (OperationCanceledException)
         {
@@ -127,7 +136,7 @@ public static class XiaoHeiHeService
         catch (Exception ex)
         {
             LogService.Warn("入库", $"小黑盒详情异常 AppID {appId}，转备用源：{ex.Message}");
-            return (null, null);
+            return (null, null, "");
         }
     }
 

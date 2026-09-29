@@ -105,7 +105,13 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         _depotService.AllSourcesUpdated -= OnAllSourcesUpdated;
     }
 
-    public record FoundGame(int AppId, string Name, string CoverUrl, List<string>? CoverCandidates = null);
+    public record FoundGame(int AppId, string Name, string CoverUrl, List<string>? CoverCandidates = null, string ReleaseDate = "")
+    {
+        // 副标题：有发售日期拼后面，无则只显示 AppID
+        public string DisplaySubtitle => string.IsNullOrEmpty(ReleaseDate)
+            ? $"AppID: {AppId}"
+            : $"AppID: {AppId} · 发售：{ReleaseDate}";
+    }
 
     // 封面候选去重：首选失败时 UI 按序切换；老模板垫底（新游戏已 404，失败即停）
     private static List<string> CoverCandidates(int appId, params string?[] urls)
@@ -153,10 +159,10 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         {
             if (int.TryParse(query, out int appId))
             {
-                var (name, headerImage) = await GetAppNameAsync(appId, cts.Token);
-                // appdetails 无数据时用小黑盒精确补中文名与封面，再不行走原有备用源
+                var (name, headerImage, releaseDate) = await GetAppNameAsync(appId, cts.Token);
+                // appdetails 无数据时用小黑盒精确补中文名、封面与发售日期，再不行走原有备用源
                 if (name == null)
-                    (name, headerImage) = await XiaoHeiHeService.GetGameDetailAsync(appId, cts.Token);
+                    (name, headerImage, releaseDate) = await XiaoHeiHeService.GetGameDetailAsync(appId, cts.Token);
                 // 商店下架的游戏 appdetails 无数据，用备用源再捞一次名字
                 if (name == null)
                 {
@@ -171,7 +177,7 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
                         ? headerImage
                         : $"https://cdn.cloudflare.steamstatic.com/steam/apps/{appId}/header.jpg";
                     SearchResults.Add(new FoundGame(appId, name, coverUrl,
-                        CoverCandidates(appId, coverUrl)));
+                        CoverCandidates(appId, coverUrl), releaseDate));
                     AddLog($"找到：{name} (ID: {appId})");
                     StatusMessage = $"找到：{name}";
                 }
@@ -210,7 +216,7 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         }
     }
 
-    private async Task<(string? Name, string? HeaderImage)> GetAppNameAsync(int appId, CancellationToken ct = default)
+    private async Task<(string? Name, string? HeaderImage, string ReleaseDate)> GetAppNameAsync(int appId, CancellationToken ct = default)
     {
         // 中文优先、查不到转英文；Steam 会对合服/改 ID 的游戏返回重定向后的 AppID 做 key，
         // 精确 key 命中失败时取首个 success 项（如 3669870 返回的 key 是 4760190）
@@ -251,9 +257,14 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
                         var headerImage = data.TryGetProperty("header_image", out var img)
                             ? img.GetString()
                             : null;
+                        var releaseDate = data.TryGetProperty("release_date", out var rd) &&
+                            rd.ValueKind == JsonValueKind.Object && rd.TryGetProperty("date", out var dt) &&
+                            dt.ValueKind == JsonValueKind.String
+                            ? dt.GetString() ?? ""
+                            : "";
                         var gameName = name.GetString();
                         if (!string.IsNullOrWhiteSpace(gameName))
-                            return (gameName, headerImage);
+                            return (gameName, headerImage, releaseDate.Trim());
                     }
                 }
             }
@@ -266,7 +277,7 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
                 LogService.Warn("入库", $"GetAppNameAsync 失败 AppID {appId} ({lang}): {ex.Message}");
             }
         }
-        return (null, null);
+        return (null, null, "");
     }
 
     private async Task SearchByNameAsync(string name, CancellationToken ct)
@@ -277,7 +288,7 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         {
             var heiCount = Math.Min(heiHe.Count, 10);
             for (var i = 0; i < heiCount; i++)
-                SearchResults.Add(new FoundGame(heiHe[i].AppId, heiHe[i].Name, heiHe[i].CoverUrl, heiHe[i].CoverCandidates));
+                SearchResults.Add(new FoundGame(heiHe[i].AppId, heiHe[i].Name, heiHe[i].CoverUrl, heiHe[i].CoverCandidates, heiHe[i].ReleaseDate));
             AddLog($"找到 {heiCount} 个匹配结果");
             StatusMessage = $"找到 {heiCount} 个匹配结果";
             return;

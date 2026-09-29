@@ -107,7 +107,7 @@ public class SteamApiService : ISteamApiService
 				var swApi = System.Diagnostics.Stopwatch.StartNew();
 				try
 				{
-					var (apiName, _) = await XiaoHeiHeService.GetGameDetailAsync(testAppId);
+					var (apiName, _, _) = await XiaoHeiHeService.GetGameDetailAsync(testAppId);
 					swApi.Stop();
 					return (cdn.Name, swApi.ElapsedMilliseconds, !string.IsNullOrEmpty(apiName));
 				}
@@ -312,7 +312,7 @@ public class SteamApiService : ISteamApiService
 			// 0. 小黑盒国内源优先：中文名 + 封面直链；失败静默走原有链路
 			if (needName || needCover)
 			{
-				var (heiName, heiCover) = await XiaoHeiHeService.GetGameDetailAsync(game.AppId, cancellationToken);
+					var (heiName, heiCover, _) = await XiaoHeiHeService.GetGameDetailAsync(game.AppId, cancellationToken);
 				if (!string.IsNullOrWhiteSpace(heiName))
 				{
 					game.GameName = heiName;

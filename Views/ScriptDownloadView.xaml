@@ -158,10 +158,8 @@
                                     <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold"
                                                Foreground="{DynamicResource TextFillColorPrimaryBrush}"
                                                TextTrimming="CharacterEllipsis"/>
-                                    <TextBlock FontSize="12" Margin="0,2,0,0"
-                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}">
-                                        <Run Text="AppID: "/><Run Text="{Binding AppId}"/>
-                                    </TextBlock>
+                                    <TextBlock Text="{Binding DisplaySubtitle}" FontSize="12" Margin="0,2,0,0"
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                                 </StackPanel>
                                 <StackPanel Grid.Column="2" Orientation="Horizontal">
                                     <Button Tag="{Binding}"
