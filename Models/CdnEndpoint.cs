@@ -18,11 +18,11 @@ public class CdnEndpoint
     {
         new("Store API", "https://store.steampowered.com/api/appdetails?appids={0}&l=schinese&filters=basic")
         { IsImageEndpoint = false },
+        new("Heybox 国内源 (默认)", "heybox://{0}") { IsApiLookup = true },
         new("Akamai 主节点", "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{0}/header.jpg"),
         new("Akamai 备用", "https://cdn.akamai.steamstatic.com/steam/apps/{0}/header.jpg"),
         new("Cloudflare CDN", "https://cdn.cloudflare.steamstatic.com/steam/apps/{0}/header.jpg"),
         new("Akamai 大图", "https://cdn.akamai.steamstatic.com/steam/apps/{0}/library_600x900.jpg"),
-        new("Heybox 国内源 (默认)", "heybox://{0}") { IsApiLookup = true },
     };
 
     public override string ToString() => Name;

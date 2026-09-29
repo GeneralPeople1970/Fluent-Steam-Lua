@@ -10,6 +10,8 @@ public class AppSettings
     public bool AutoRefreshEnabled { get; set; } = true;
     // 封面节点默认 Heybox 国内源；已存档的老用户保持原选择，不静默迁移
     public int SelectedCdnIndex { get; set; } = CdnEndpoint.Defaults.FindIndex(c => c.IsApiLookup);
+    // 封面节点序号迁移标记：Heybox 置顶前存档的旧序号需重映射；新对象默认已迁移
+    public bool CdnOrderMigrated { get; set; } = true;
     public string SelectedViewMode { get; set; } = "卡片";
     public string AchievementViewMode { get; set; } = "卡片";
     public string SelectedBackdrop { get; set; } = "Acrylic10";
@@ -62,12 +64,28 @@ public class SettingsService : ISettingsService
             if (File.Exists(_settingsFilePath))
             {
                 var json = File.ReadAllText(_settingsFilePath);
-                var settings = JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
+                using var doc = JsonDocument.Parse(json);
+                var settings = doc.RootElement.Deserialize<AppSettings>(JsonOptions) ?? new AppSettings();
                 if (string.IsNullOrWhiteSpace(settings.DownloadMode))
                     settings.DownloadMode = "DepotKey";
                 // 本地缓存仓库 V2 已废弃，老配置迁移到唯一保留的本地缓存仓库
                 else if (settings.DownloadMode == "DepotKey2")
                     settings.DownloadMode = "DepotKey";
+                // 封面节点 Heybox 置顶：旧序号 1..4 → +1，旧 5（Heybox）→ 1，0 不变；
+                // 史前存档（无该键）当时 effective 值为旧默认 0，保持 0；幂等，下次 Save 落盘
+                if (!settings.CdnOrderMigrated)
+                {
+                    if (!doc.RootElement.TryGetProperty(nameof(AppSettings.SelectedCdnIndex), out _))
+                        settings.SelectedCdnIndex = 0;
+                    else
+                        settings.SelectedCdnIndex = settings.SelectedCdnIndex switch
+                        {
+                            >= 1 and <= 4 => settings.SelectedCdnIndex + 1,
+                            5 => 1,
+                            _ => settings.SelectedCdnIndex,
+                        };
+                    settings.CdnOrderMigrated = true;
+                }
                 if (string.IsNullOrWhiteSpace(settings.ManifestMirror))
                     settings.ManifestMirror = GitHubMirror.DirectKey;
                 return settings;
