@@ -105,7 +105,22 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         _depotService.AllSourcesUpdated -= OnAllSourcesUpdated;
     }
 
-    public record FoundGame(int AppId, string Name, string CoverUrl);
+    public record FoundGame(int AppId, string Name, string CoverUrl, List<string>? CoverCandidates = null);
+
+    // 封面候选去重：首选失败时 UI 按序切换；老模板垫底（新游戏已 404，失败即停）
+    private static List<string> CoverCandidates(int appId, params string?[] urls)
+    {
+        var list = new List<string>();
+        foreach (var u in urls)
+        {
+            if (!string.IsNullOrWhiteSpace(u) && !list.Contains(u))
+                list.Add(u);
+        }
+        var fallback = $"https://cdn.cloudflare.steamstatic.com/steam/apps/{appId}/header.jpg";
+        if (!list.Contains(fallback))
+            list.Add(fallback);
+        return list;
+    }
 
     private static void ConfigureSteamStoreHeaders(HttpClient client)
     {
@@ -139,6 +154,9 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
             if (int.TryParse(query, out int appId))
             {
                 var (name, headerImage) = await GetAppNameAsync(appId, cts.Token);
+                // appdetails 无数据时用小黑盒精确补中文名与封面，再不行走原有备用源
+                if (name == null)
+                    (name, headerImage) = await XiaoHeiHeService.GetGameDetailAsync(appId, cts.Token);
                 // 商店下架的游戏 appdetails 无数据，用备用源再捞一次名字
                 if (name == null)
                 {
@@ -152,7 +170,8 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
                     var coverUrl = !string.IsNullOrWhiteSpace(headerImage)
                         ? headerImage
                         : $"https://cdn.cloudflare.steamstatic.com/steam/apps/{appId}/header.jpg";
-                    SearchResults.Add(new FoundGame(appId, name, coverUrl));
+                    SearchResults.Add(new FoundGame(appId, name, coverUrl,
+                        CoverCandidates(appId, coverUrl)));
                     AddLog($"找到：{name} (ID: {appId})");
                     StatusMessage = $"找到：{name}";
                 }
@@ -164,7 +183,8 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
                     SearchResults.Add(new FoundGame(
                         appId,
                         $"AppID: {appId}",
-                        $"https://cdn.cloudflare.steamstatic.com/steam/apps/{appId}/header.jpg"));
+                        $"https://cdn.cloudflare.steamstatic.com/steam/apps/{appId}/header.jpg",
+                        CoverCandidates(appId)));
                     StatusMessage = "未查到名称，已用 AppID 占位";
                 }
             }
@@ -251,6 +271,18 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
 
     private async Task SearchByNameAsync(string name, CancellationToken ct)
     {
+        // 国内源优先：小黑盒中英文直搜；有效结果直接返回，无结果/异常静默走现有链路
+        var heiHe = await XiaoHeiHeService.SearchByNameAsync(name, ct);
+        if (heiHe.Count > 0)
+        {
+            var heiCount = Math.Min(heiHe.Count, 10);
+            for (var i = 0; i < heiCount; i++)
+                SearchResults.Add(new FoundGame(heiHe[i].AppId, heiHe[i].Name, heiHe[i].CoverUrl, heiHe[i].CoverCandidates));
+            AddLog($"找到 {heiCount} 个匹配结果");
+            StatusMessage = $"找到 {heiCount} 个匹配结果";
+            return;
+        }
+
         // 多组地区/语言降级重试：cc=cn&l=schinese 的索引含中文本地化名称（中文搜索必需），
         // cc=us&l=english 兜底英文/外区匹配；命中即停
         foreach (var (cc, lang) in StoreSearchLocales)
@@ -307,7 +339,8 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
                     coverUrl = $"https://cdn.cloudflare.steamstatic.com/steam/apps/{appId}/header.jpg";
                 }
 
-                SearchResults.Add(new FoundGame(appId, gameName, coverUrl));
+                SearchResults.Add(new FoundGame(appId, gameName, coverUrl,
+                    CoverCandidates(appId, coverUrl)));
             }
 
             AddLog($"找到 {count} 个匹配结果");

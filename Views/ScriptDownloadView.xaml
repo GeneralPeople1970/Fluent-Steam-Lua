@@ -151,6 +151,7 @@
                                         <RectangleGeometry Rect="0,0,120,52" RadiusX="6" RadiusY="6"/>
                                     </Border.Clip>
                                     <Image Source="{Binding CoverUrl}" Stretch="UniformToFill"
+                                           ImageFailed="SearchCover_ImageFailed"
                                            RenderOptions.BitmapScalingMode="HighQuality"/>
                                 </Border>
                                 <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="14,0,0,0">
