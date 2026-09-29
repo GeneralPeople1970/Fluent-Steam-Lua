@@ -8,7 +8,8 @@ public class AppSettings
 {
     public string SteamPath { get; set; } = string.Empty;
     public bool AutoRefreshEnabled { get; set; } = true;
-    public int SelectedCdnIndex { get; set; }
+    // 封面节点默认 Heybox 国内源；已存档的老用户保持原选择，不静默迁移
+    public int SelectedCdnIndex { get; set; } = CdnEndpoint.Defaults.FindIndex(c => c.IsApiLookup);
     public string SelectedViewMode { get; set; } = "卡片";
     public string AchievementViewMode { get; set; } = "卡片";
     public string SelectedBackdrop { get; set; } = "Acrylic10";

@@ -59,22 +59,30 @@ public class SteamApiService : ISteamApiService
 		return urls;
 	}
 
-	/// <summary>按选中图片节点优先 → 其余图片节点的顺序构建 CDN 封面 URL 链（不含官方兜底）。</summary>
+	/// <summary>按选中图片节点优先 → 其余图片节点的顺序构建 CDN 封面 URL 链（不含官方兜底）；接口型源不参与拼接。</summary>
 	private List<string> BuildCdnUrlChain(int appId)
 	{
 		var endpoints = CdnEndpoint.Defaults;
 		var urls = new List<string>();
 
-		if (_selectedCdnIndex > 0 && _selectedCdnIndex < endpoints.Count && endpoints[_selectedCdnIndex].IsImageEndpoint)
+		if (_selectedCdnIndex > 0 && _selectedCdnIndex < endpoints.Count &&
+			endpoints[_selectedCdnIndex].IsImageEndpoint && !endpoints[_selectedCdnIndex].IsApiLookup)
 			urls.Add(string.Format(endpoints[_selectedCdnIndex].UrlTemplate, appId));
 
 		for (int i = 1; i < endpoints.Count; i++)
 		{
-			if (i != _selectedCdnIndex && endpoints[i].IsImageEndpoint)
+			if (i != _selectedCdnIndex && endpoints[i].IsImageEndpoint && !endpoints[i].IsApiLookup)
 				urls.Add(string.Format(endpoints[i].UrlTemplate, appId));
 		}
 
 		return urls;
+	}
+
+	/// <summary>当前选中的是否为接口型源（Heybox）；是则封面走接口直链优先，不参与模板拼接。</summary>
+	private bool IsHeyboxSelected()
+	{
+		var endpoints = CdnEndpoint.Defaults;
+		return _selectedCdnIndex >= 0 && _selectedCdnIndex < endpoints.Count && endpoints[_selectedCdnIndex].IsApiLookup;
 	}
 
 	/// <summary>实时查询 Store API 的真实封面 URL（header_image 字段）：schinese 优先，失败回退 english。</summary>
@@ -93,6 +101,22 @@ public class SteamApiService : ISteamApiService
 
 		var taskList = CdnEndpoint.Defaults.Select(async cdn =>
 		{
+			// 接口型源无直链可测：用一次真实详情查询计时
+			if (cdn.IsApiLookup)
+			{
+				var swApi = System.Diagnostics.Stopwatch.StartNew();
+				try
+				{
+					var (apiName, _) = await XiaoHeiHeService.GetGameDetailAsync(testAppId);
+					swApi.Stop();
+					return (cdn.Name, swApi.ElapsedMilliseconds, !string.IsNullOrEmpty(apiName));
+				}
+				catch
+				{
+					swApi.Stop();
+					return (cdn.Name, swApi.ElapsedMilliseconds, false);
+				}
+			}
 			var url = string.Format(cdn.UrlTemplate, testAppId);
 			var sw = System.Diagnostics.Stopwatch.StartNew();
 			try
@@ -238,24 +262,25 @@ public class SteamApiService : ISteamApiService
 			var needCover = fetchCover && !IsValidCoverFile(coverPath);
 			if (needCover && File.Exists(coverPath))
 				DeleteInvalidCover(coverPath, game);
-			string? headerUrl = null;
 
-			// 1. 优先通过 Store API 获取 header_image URL（同时获取名称）
+			// 1. 元数据段：小黑盒优先（中文名 + 封面直链），Store API 与后备源补位
+			string? headerUrl = null;
+			string? heiheCover = null;
 			if (needCover || needName)
 			{
-				headerUrl = await FetchMetaSectionAsync(game, needName, needCover, headerUrl, cancellationToken);
+				(headerUrl, heiheCover) = await FetchMetaSectionAsync(game, needName, needCover, cancellationToken);
 			}
 
-			// 2. 封面下载：选中 CDN → Store API header_image → 其余 CDN（独立闸门）
+			// 2. 封面下载：选中 CDN（Heybox 选中时走接口直链优先）→ 小黑盒 → Store header_image → 其余 CDN（独立闸门）
 			if (needCover)
 			{
-				var cover = await DownloadCoverChainAsync(game.AppId, headerUrl, cancellationToken);
+				var cover = await DownloadCoverChainAsync(game.AppId, headerUrl, heiheCover, cancellationToken);
 				if (string.IsNullOrEmpty(cover))
 				{
 					// 第一轮扫空：闸门外等 2 秒再扫一轮，等待期间不占并发槽
 					try { await Task.Delay(2000, cancellationToken); } catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
 					if (!cancellationToken.IsCancellationRequested)
-						cover = await DownloadCoverChainAsync(game.AppId, headerUrl, cancellationToken);
+						cover = await DownloadCoverChainAsync(game.AppId, headerUrl, heiheCover, cancellationToken);
 				}
 				if (!string.IsNullOrEmpty(cover))
 					game.CoverImagePath = cover;
@@ -275,14 +300,37 @@ public class SteamApiService : ISteamApiService
 		}
 	}
 
-	// 元数据段（Store API + 后备名字源）：独立闸门，进出配对释放
-	private async Task<string?> FetchMetaSectionAsync(GameInfo game, bool needName, bool needCover, string? headerUrl, CancellationToken cancellationToken)
+	// 元数据段（小黑盒 → Store API → 后备名字源）：独立闸门，进出配对释放
+	private async Task<(string? HeaderUrl, string? HeiheCover)> FetchMetaSectionAsync(
+		GameInfo game, bool needName, bool needCover, CancellationToken cancellationToken)
 	{
 		await _metaGate.WaitAsync(cancellationToken);
+		string? headerUrl = null;
+		string? heiheCover = null;
 		try
 		{
+			// 0. 小黑盒国内源优先：中文名 + 封面直链；失败静默走原有链路
+			if (needName || needCover)
+			{
+				var (heiName, heiCover) = await XiaoHeiHeService.GetGameDetailAsync(game.AppId, cancellationToken);
+				if (!string.IsNullOrWhiteSpace(heiName))
+				{
+					game.GameName = heiName;
+					_nameCache[game.AppId] = heiName;
+				}
+				if (!string.IsNullOrWhiteSpace(heiCover))
+					heiheCover = heiCover;
+			}
+
+			// 小黑盒已补到真名后不再用 Store 覆盖；仍缺名才继续原有链路
+			var stillNeedName = needName && (string.IsNullOrEmpty(game.GameName) ||
+				game.GameName == $"AppID: {game.AppId}" || IsJunkGameName(game.GameName));
+
+			// 小黑盒名+封面双全时直接跳过 Store API（Heybox 选中下的常见情形，不再刷超时日志）
+			if (stillNeedName || (needCover && heiheCover == null))
+			{
 				var storeResult = await TryStoreApi(game.AppId, "schinese", cancellationToken);
-				if (needName && storeResult.Name != null)
+				if (stillNeedName && storeResult.Name != null)
 				{
 					game.GameName = storeResult.Name;
 					_nameCache[game.AppId] = storeResult.Name;
@@ -291,7 +339,7 @@ public class SteamApiService : ISteamApiService
 					headerUrl = storeResult.HeaderUrl;
 
 				var triedEnglish = false;
-				if (needName && storeResult.Name == null)
+				if (stillNeedName && storeResult.Name == null)
 				{
 					storeResult = await TryStoreApi(game.AppId, "english", cancellationToken);
 					triedEnglish = true;
@@ -309,46 +357,48 @@ public class SteamApiService : ISteamApiService
 					storeResult = await TryStoreApi(game.AppId, "english", cancellationToken);
 					headerUrl = storeResult.HeaderUrl;
 				}
+			}
 
-				// 名称后备来源（SteamSpy / SteamCommunity）
-				if (needName && string.IsNullOrEmpty(game.GameName))
+			// 名称后备来源（SteamSpy / SteamCommunity）
+			if (stillNeedName && string.IsNullOrEmpty(game.GameName))
+			{
+				var spyName = await TrySteamSpy(game.AppId, cancellationToken);
+				if (spyName != null)
 				{
-					var spyName = await TrySteamSpy(game.AppId, cancellationToken);
-					if (spyName != null)
+					game.GameName = spyName;
+					_nameCache[game.AppId] = spyName;
+				}
+				else
+				{
+					var communityName = await TrySteamCommunity(game.AppId, cancellationToken);
+					if (communityName != null)
 					{
-						game.GameName = spyName;
-						_nameCache[game.AppId] = spyName;
-					}
-					else
-					{
-						var communityName = await TrySteamCommunity(game.AppId, cancellationToken);
-						if (communityName != null)
-						{
-							game.GameName = communityName;
-							_nameCache[game.AppId] = communityName;
-						}
+						game.GameName = communityName;
+						_nameCache[game.AppId] = communityName;
 					}
 				}
+			}
 		}
 		finally
 		{
 			_metaGate.Release();
 		}
-		return headerUrl;
+		return (headerUrl, heiheCover);
 	}
 
 	// 封面链下载：闸门只罩住真实请求，两轮之间的 2 秒等待不占槽
 
-	private async Task<string?> DownloadCoverChainAsync(int appId, string? headerUrl, CancellationToken cancellationToken)
+	private async Task<string?> DownloadCoverChainAsync(int appId, string? headerUrl, string? heiheUrl, CancellationToken cancellationToken)
 	{
 		await _coverGate.WaitAsync(cancellationToken);
 		try
 		{
 			string? cover = null;
+			var heyboxFirst = IsHeyboxSelected();
 
-			// 用户选中了某个图片 CDN（非 Store API）→ 优先尝试
+			// 用户选中了某个图片 CDN（非 Heybox）→ 优先尝试
 			var cdnChain = BuildCdnUrlChain(appId);
-			if (cdnChain.Count > 0)
+			if (!heyboxFirst && cdnChain.Count > 0)
 			{
 				var (first, nodeFailed) = await DownloadCoverFromUrl(cdnChain[0], appId, cancellationToken);
 				cover = first;
@@ -363,7 +413,12 @@ public class SteamApiService : ISteamApiService
 				}
 			}
 
-			// Store API header_image 第二顺位（官方直链，失败不计入切源）
+			// 小黑盒国内直链：Heybox 选中时第一顺位，否则排在选中 CDN 之后、Store 官方直链之前；
+			// 接口失败不计入 CDN 切源（不同系统）
+			if (string.IsNullOrEmpty(cover) && !string.IsNullOrEmpty(heiheUrl))
+				(cover, _) = await DownloadCoverFromUrl(heiheUrl, appId, cancellationToken);
+
+			// Store API header_image（官方直链，失败不计入切源）
 			if (string.IsNullOrEmpty(cover) && headerUrl != null)
 				(cover, _) = await DownloadCoverFromUrl(headerUrl, appId, cancellationToken);
 
