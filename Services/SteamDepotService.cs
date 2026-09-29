@@ -259,16 +259,17 @@ public class SteamDepotService : ISteamDepotService
         AllSourcesUpdated?.Invoke();
     }
 
-    public async Task<DepotQueryResult?> QueryAppAsync(int appId, CancellationToken ct = default)
+    public async Task<DepotQueryResult?> QueryAppAsync(int appId, CancellationToken ct = default, int timeoutSeconds = 30, int maxAttempts = 3)
     {
         try
         {
             var url = $"https://api.steamcmd.net/v1/info/{appId}";
             var response = await _httpClientProvider.SendWithProxyRetryAsync(
                 $"steam-depot-{_currentSource}",
-                TimeSpan.FromSeconds(30),
+                TimeSpan.FromSeconds(timeoutSeconds),
                 client => client.GetStringAsync(url, ct),
-                HttpHeaderHelper.ConfigureBrowser);
+                HttpHeaderHelper.ConfigureBrowser,
+                maxAttempts);
             using var doc = JsonDocument.Parse(response);
 
             if (!doc.RootElement.TryGetProperty("data", out var data)) return null;
@@ -387,13 +388,18 @@ public class SteamDepotService : ISteamDepotService
         return 0;
     }
 
-    public Task<string?> GenerateLuaAsync(int appId, CancellationToken ct = default, bool pinManifest = false)
-        => BuildLuaCoreAsync(appId, withDlc: false, pinManifest, ct);
+    public Task<string?> GenerateLuaAsync(
+        int appId, CancellationToken ct = default, bool pinManifest = false, bool fetchNames = false)
+        => BuildLuaCoreAsync(appId, withDlc: false, pinManifest, ct, fetchNames: fetchNames);
 
-    public Task<string?> GenerateLuaWithDlcAsync(int appId, CancellationToken ct = default, bool pinManifest = false)
-        => BuildLuaCoreAsync(appId, withDlc: true, pinManifest, ct);
+    public Task<string?> GenerateLuaWithDlcAsync(
+        int appId, CancellationToken ct = default, bool pinManifest = false,
+        IProgress<(int Done, int Total)>? dlcProgress = null, bool fetchNames = false)
+        => BuildLuaCoreAsync(appId, withDlc: true, pinManifest, ct, dlcProgress, fetchNames);
 
-    private async Task<string?> BuildLuaCoreAsync(int appId, bool withDlc, bool pinManifest, CancellationToken ct)
+    private async Task<string?> BuildLuaCoreAsync(
+        int appId, bool withDlc, bool pinManifest, CancellationToken ct,
+        IProgress<(int Done, int Total)>? dlcProgress = null, bool fetchNames = false)
     {
         try
         {
@@ -411,8 +417,10 @@ public class SteamDepotService : ISteamDepotService
             sb.AppendLine();
             var matchedItems = 0;
 
-            // 主 AppID（优先中文名，同主页 DLC 名称获取逻辑）
-            var mainStoreName = await TryGetStoreNameAsync(appId, queryResult.AppName, ct);
+            // 主 AppID 名称注释：仅勾选时查询，否则只写 ID
+            var mainStoreName = fetchNames
+                ? await TryGetDisplayNameAsync(appId, queryResult.AppName, ct)
+                : "";
             var mainName = SanitizeLuaComment(mainStoreName);
             if (depotKeys.TryGetValue(appId.ToString(), out var mainKey))
             {
@@ -435,7 +443,7 @@ public class SteamDepotService : ISteamDepotService
             HashSet<int> mainDepotIds = new(queryResult.GameDepots.Select(d => d.DepotId));
             if (withDlc && queryResult.DlcAppIds.Count > 0)
             {
-                dlcInfos = await FetchDlcInfosAsync(queryResult.DlcAppIds, ct);
+                dlcInfos = await FetchDlcInfosAsync(queryResult.DlcAppIds, dlcProgress, fetchNames, ct);
                 foreach (var info in dlcInfos)
                     if (!string.IsNullOrWhiteSpace(info.DisplayName))
                         contentNames[info.AppId] = info.DisplayName;
@@ -577,10 +585,26 @@ public class SteamDepotService : ISteamDepotService
 
     private sealed record DlcBuildInfo(int AppId, DepotQueryResult? Result, string DisplayName);
 
-    // 并发预取各 DLC 的仓库信息与中文名，限流避免触发站点风控；单个失败不影响整体生成
-    private async Task<DlcBuildInfo[]> FetchDlcInfosAsync(List<int> dlcAppIds, CancellationToken ct)
+    // 显示名优先级：小黑盒 > steamcmd（裸连可达，已有结果零成本）> Store schinese
+    private async Task<string> TryGetDisplayNameAsync(int appId, string steamcmdName, CancellationToken ct)
+    {
+        try
+        {
+            var (heiName, _, _) = await XiaoHeiHeService.GetGameDetailAsync(appId, ct);
+            if (!string.IsNullOrWhiteSpace(heiName)) return heiName;
+        }
+        catch { }
+        if (!string.IsNullOrWhiteSpace(steamcmdName)) return steamcmdName;
+        return await TryGetStoreNameAsync(appId, "", ct);
+    }
+
+    // 并发预取各 DLC 的仓库信息；名称注释仅勾选时查询，否则只写 ID；
+    // 限流避免触发站点风控，批量查询 10 秒单次；入库流程未接取消，单项异常（含超时）全部吞掉记缺省，不拖垮整批
+    private async Task<DlcBuildInfo[]> FetchDlcInfosAsync(
+        List<int> dlcAppIds, IProgress<(int Done, int Total)>? progress, bool fetchNames, CancellationToken ct)
     {
         var infos = new DlcBuildInfo[dlcAppIds.Count];
+        var done = 0;
         await Parallel.ForEachAsync(Enumerable.Range(0, dlcAppIds.Count),
             new ParallelOptions { MaxDegreeOfParallelism = 6, CancellationToken = ct },
             async (index, innerCt) =>
@@ -588,47 +612,48 @@ public class SteamDepotService : ISteamDepotService
                 var appId = dlcAppIds[index];
                 try
                 {
-                    var nameTask = TryGetStoreNameAsync(appId, "", innerCt);
-                    var resultTask = QueryAppAsync(appId, innerCt);
-                    await Task.WhenAll(nameTask, resultTask).ConfigureAwait(false);
-                    var fallback = resultTask.Result?.AppName ?? "";
-                    var name = nameTask.Result;
-                    infos[index] = new DlcBuildInfo(appId, resultTask.Result,
-                        string.IsNullOrWhiteSpace(name) ? fallback : name);
+                    // 先拿仓库（门禁与 depot 行必需），名字用现成 steamcmd 名垫底，Store 只在双缺时才打
+                    var result = await QueryAppAsync(appId, innerCt, timeoutSeconds: 10, maxAttempts: 1).ConfigureAwait(false);
+                    var displayName = "";
+                    if (fetchNames)
+                        displayName = await TryGetDisplayNameAsync(appId, result?.AppName ?? "", innerCt).ConfigureAwait(false);
+                    infos[index] = new DlcBuildInfo(appId, result, displayName);
                 }
-                catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
                     LogService.Warn("入库", $"获取 DLC {appId} 信息失败: {ex.Message}");
                     infos[index] = new DlcBuildInfo(appId, null, "");
                 }
+                progress?.Report((Interlocked.Increment(ref done), dlcAppIds.Count));
             }).ConfigureAwait(false);
         return infos;
     }
 
-    // 批量查各 DLC 是否有独立仓库：6 路并行（与预取同限流），单个失败记 null（未知）
-    public async Task<Dictionary<int, bool?>> GetDlcHasDepotsAsync(
+    // 批量查各 DLC 是否有独立仓库：6 路并行（与预取同限流），单个失败记 null（未知）；
+    // AppName 顺带给对话框垫底显示，零成本
+    public async Task<Dictionary<int, DlcDepotStatus?>> GetDlcHasDepotsAsync(
         IEnumerable<int> dlcIds, IProgress<(int Done, int Total)>? progress = null, CancellationToken ct = default)
     {
         var ids = dlcIds.ToList();
-        var map = new Dictionary<int, bool?>();
+        var map = new Dictionary<int, DlcDepotStatus?>();
         var done = 0;
         await Parallel.ForEachAsync(ids,
             new ParallelOptions { MaxDegreeOfParallelism = 6, CancellationToken = ct },
             async (id, innerCt) =>
             {
-                bool? has = null;
+                DlcDepotStatus? status = null;
                 try
                 {
-                    var r = await QueryAppAsync(id, innerCt);
-                    if (r != null) has = r.GameDepots.Count > 0;
+                    var r = await QueryAppAsync(id, innerCt, timeoutSeconds: 10, maxAttempts: 1);
+                    if (r != null) status = new DlcDepotStatus(r.GameDepots.Count > 0, r.AppName ?? "");
                 }
-                catch (OperationCanceledException) { throw; }
+                // 仅调用方主动取消才中断整批；单项超时视为未知，回退旧启发式
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)
                 {
                     LogService.Warn("入库", $"查询 DLC {id} 仓库失败: {ex.Message}");
                 }
-                lock (map) { map[id] = has; }
+                lock (map) { map[id] = status; }
                 progress?.Report((Interlocked.Increment(ref done), ids.Count));
             }).ConfigureAwait(false);
         return map;

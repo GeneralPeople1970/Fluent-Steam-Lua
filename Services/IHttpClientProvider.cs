@@ -10,8 +10,8 @@ namespace SteamLuaManager.Services;
 public interface IHttpClientProvider
 {
     HttpClient GetClient(string name, TimeSpan timeout, Action<HttpClient>? configure = null);
-    Task<T> SendWithProxyRetryAsync<T>(string name, TimeSpan timeout, Func<HttpClient, Task<T>> sendAsync, Action<HttpClient>? configure = null);
-    Task SendWithProxyRetryAsync(string name, TimeSpan timeout, Func<HttpClient, Task> sendAsync, Action<HttpClient>? configure = null);
+    Task<T> SendWithProxyRetryAsync<T>(string name, TimeSpan timeout, Func<HttpClient, Task<T>> sendAsync, Action<HttpClient>? configure = null, int maxAttempts = 3);
+    Task SendWithProxyRetryAsync(string name, TimeSpan timeout, Func<HttpClient, Task> sendAsync, Action<HttpClient>? configure = null, int maxAttempts = 3);
     void Reset(string? name = null);
 }
 
@@ -50,12 +50,12 @@ public sealed class HttpClientProvider : IHttpClientProvider, IDisposable
         }
     }
 
-    public async Task<T> SendWithProxyRetryAsync<T>(string name, TimeSpan timeout, Func<HttpClient, Task<T>> sendAsync, Action<HttpClient>? configure = null)
+    public async Task<T> SendWithProxyRetryAsync<T>(string name, TimeSpan timeout, Func<HttpClient, Task<T>> sendAsync, Action<HttpClient>? configure = null, int maxAttempts = 3)
     {
-        // 最多尝试 3 次：并发下旧实例被废弃是常态，靠“仅当字典仍持有才废弃”收敛，
-        // 孤儿连接上的在飞请求不受影响
+        // 最多尝试 maxAttempts 次：并发下旧实例被废弃是常态，靠“仅当字典仍持有才废弃”收敛，
+        // 孤儿连接上的在飞请求不受影响；批量查询传 1，失败即回调用方降级，不多耗
         Exception? lastError = null;
-        for (int attempt = 0; attempt < 3; attempt++)
+        for (int attempt = 0; attempt < Math.Max(1, maxAttempts); attempt++)
         {
             var client = GetClient(name, timeout, configure);
             try
@@ -74,10 +74,10 @@ public sealed class HttpClientProvider : IHttpClientProvider, IDisposable
         throw lastError!;
     }
 
-    public async Task SendWithProxyRetryAsync(string name, TimeSpan timeout, Func<HttpClient, Task> sendAsync, Action<HttpClient>? configure = null)
+    public async Task SendWithProxyRetryAsync(string name, TimeSpan timeout, Func<HttpClient, Task> sendAsync, Action<HttpClient>? configure = null, int maxAttempts = 3)
     {
         Exception? lastError = null;
-        for (int attempt = 0; attempt < 3; attempt++)
+        for (int attempt = 0; attempt < Math.Max(1, maxAttempts); attempt++)
         {
             var client = GetClient(name, timeout, configure);
             try

@@ -49,6 +49,9 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool _pinManifest;
 
+    [ObservableProperty]
+    private bool _fetchNameComments;
+
     public bool IsLocalCacheMode => _currentDownloadMode == "DepotKey";
     public string CurrentDataSourceLabel => _currentDownloadMode switch
     {
@@ -159,10 +162,10 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         {
             if (int.TryParse(query, out int appId))
             {
-                var (name, headerImage, releaseDate) = await GetAppNameAsync(appId, cts.Token);
-                // appdetails 无数据时用小黑盒精确补中文名、封面与发售日期，再不行走原有备用源
+                // 小黑盒国内源优先（正常 0.3 秒返回）；miss 才进 appdetails，避免 Store 超时挡路
+                var (name, headerImage, releaseDate) = await XiaoHeiHeService.GetGameDetailAsync(appId, cts.Token);
                 if (name == null)
-                    (name, headerImage, releaseDate) = await XiaoHeiHeService.GetGameDetailAsync(appId, cts.Token);
+                    (name, headerImage, releaseDate) = await GetAppNameAsync(appId, cts.Token);
                 // 商店下架的游戏 appdetails 无数据，用备用源再捞一次名字
                 if (name == null)
                 {
@@ -490,7 +493,13 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         {
             if (IncludeDlc && queryResult.DlcAppIds.Count > 0)
             {
-                luaPath = await _depotService.GenerateLuaWithDlcAsync(appId, pinManifest: PinManifest);
+                // DLC 信息获取进度（每 5 个一报，收尾必报），长等待不再零日志
+                var dlcProgress = new Progress<(int Done, int Total)>(p =>
+                {
+                    if (p.Done == p.Total || p.Done % 5 == 0)
+                        AddLog($"正在获取 DLC 信息 ({p.Done}/{p.Total})...");
+                });
+                luaPath = await _depotService.GenerateLuaWithDlcAsync(appId, pinManifest: PinManifest, dlcProgress: dlcProgress, fetchNames: FetchNameComments);
                 if (!string.IsNullOrEmpty(luaPath) && File.Exists(luaPath))
                 {
                     var content = await File.ReadAllTextAsync(luaPath);
@@ -509,7 +518,7 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
             {
                 if (!IncludeDlc && queryResult.DlcAppIds.Count > 0)
                     AddLog($"已跳过 {queryResult.DlcAppIds.Count} 个 DLC（未勾选 DLC入库）");
-                luaPath = await _depotService.GenerateLuaAsync(appId, pinManifest: PinManifest);
+                luaPath = await _depotService.GenerateLuaAsync(appId, pinManifest: PinManifest, fetchNames: FetchNameComments);
             }
         }
         catch (InvalidOperationException ex)

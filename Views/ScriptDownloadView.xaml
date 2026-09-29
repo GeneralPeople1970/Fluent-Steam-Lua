@@ -92,8 +92,12 @@
                                   ToolTip="勾选后，入库时将同时入库该游戏的全部DLC（仅本地缓存仓库模式生效）"/>
                         <CheckBox Content="固定游戏版本" IsChecked="{Binding PinManifest}"
                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                                  FontSize="13"
+                                  FontSize="13" Margin="0,0,32,0"
                                   ToolTip="勾选后，入库的游戏将固定到当前游戏最新版本，后续游戏更新也不会跟随触发更新，D加密游戏推荐勾选，以防止游戏更新导致D加密授权失效（仅本地缓存仓库模式生效）"/>
+                        <CheckBox Content="获取名称注释" IsChecked="{Binding FetchNameComments}"
+                                  Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                  FontSize="13"
+                                  ToolTip="勾选后，入库时查询各游戏/仓库的中文名并写入注释；不勾选则只写ID，速度更快（仅本地缓存仓库模式生效）。仅推荐有代理/梯子的用户勾选，否则大概率会严重延长 Lua 生成时间"/>
                     </StackPanel>
                 </StackPanel>
             </Border>
