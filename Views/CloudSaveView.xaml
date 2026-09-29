@@ -14,25 +14,43 @@
             <TextBlock Text="云存档重定向" FontSize="28" FontWeight="SemiBold" Margin="0,0,0,4"
                        Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
             <StackPanel Margin="0,0,0,24">
-                <TextBlock Text="将Lua游戏的Steam云存档重定向到本地目录，以修复云存档报错问题；启用前请先备份重要存档以防出错；开关与目录变更需重启Steam生效"
+                <TextBlock Text="将Lua游戏的Steam云存档重定向到本地目录或云端存储（Google Drive / OneDrive / R2 / S3），以修复云存档报错问题"
+                           FontSize="12" TextWrapping="Wrap"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                <TextBlock Text="启用前请先备份重要存档以防出错；开关、目录与服务商变更需重启Steam生效"
                            FontSize="12" TextWrapping="Wrap"
                            Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                 <TextBlock Text="成就与时长跟随云端同步"
                            FontSize="12" TextWrapping="Wrap"
                            Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                <TextBlock Text="{Binding StatusMessage}" FontSize="12" Margin="0,8,0,0"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           Visibility="{Binding StatusMessage, Converter={StaticResource StringNotEmptyToVisibilityConverter}}"/>
             </StackPanel>
 
             <ui:SettingsCard Header="云存档" Margin="0,0,0,8"
-                             Description="开启后 Lua 游戏存档将重定向到本地目录"
+                             Description="开启后 Lua 游戏存档将重定向到所选位置"
                              Style="{StaticResource SettingsCardStyle}">
-                <ui:ToggleSwitch IsOn="{Binding IsCloudEnabled, Mode=TwoWay}"
-                                 IsEnabled="{Binding IsBusy, Converter={StaticResource BoolInvertConverter}}"
-                                 OnContent="开" OffContent="关"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <ComboBox ItemsSource="{Binding CloudProviders}"
+                                  SelectedValue="{Binding SelectedProvider}"
+                                  SelectedValuePath="Id" DisplayMemberPath="DisplayName"
+                                  Padding="8,4" MinWidth="140" Margin="0,0,12,0" VerticalAlignment="Center">
+                        <ComboBox.Background>
+                            <SolidColorBrush Color="{DynamicResource ControlFillColorDefault}" Opacity="0.45"/>
+                        </ComboBox.Background>
+                    </ComboBox>
+                    <ui:ToggleSwitch IsOn="{Binding IsCloudEnabled, Mode=TwoWay}"
+                                     IsEnabled="{Binding IsBusy, Converter={StaticResource BoolInvertConverter}}"
+                                     OnContent="开" OffContent="关" VerticalAlignment="Center"/>
+                </StackPanel>
             </ui:SettingsCard>
 
             <ui:SettingsCard Header="本地重定向目录" Margin="0,0,0,8"
-                             Description="云存档在本地的落盘位置"
-                             Style="{StaticResource SettingsCardStyle}">
+                                     Description="云存档在本地的落盘位置"
+                                     Style="{StaticResource SettingsCardStyle}"
+                                     Visibility="{Binding SelectedProvider, Converter={StaticResource EqualityToVisibilityConverter}, ConverterParameter=folder}">
                 <StackPanel Orientation="Horizontal">
                     <TextBox Text="{Binding SyncPathText, Mode=OneWay}"
                              ToolTip="{Binding SyncPathText}"
@@ -55,11 +73,166 @@
                             <SolidColorBrush Color="{DynamicResource ControlFillColorDefault}" Opacity="0.45"/>
                         </Button.Background>
                     </Button>
-                    <TextBlock VerticalAlignment="Center" FontSize="12" Margin="12,0,0,0"
-                               Text="{Binding StatusMessage}"
-                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                 </StackPanel>
             </ui:SettingsCard>
+
+                <!-- OAuth 登录面板：Google Drive / OneDrive -->
+                <Border CornerRadius="10" Padding="16" Margin="0,0,0,8"
+                        BorderBrush="{DynamicResource SurfaceStrokeColorDefaultBrush}" BorderThickness="1"
+                        Visibility="{Binding SelectedProvider, Converter={StaticResource OAuthProviderVisibilityConverter}, ConverterParameter=gdrive|onedrive}">
+                    <Border.Background>
+                        <SolidColorBrush Color="{DynamicResource CardBackgroundFillColorDefault}" Opacity="0.45"/>
+                    </Border.Background>
+                    <StackPanel>
+                        <Grid Margin="0,0,0,8">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+                                <Button Content="登录" Padding="20,6" Margin="0,0,8,0"
+                                        Command="{Binding SignInCommand}"
+                                        Visibility="{Binding IsProviderSignedIn, Converter={StaticResource InvertedBoolToVisibilityConverter}}"
+                                        IsEnabled="{Binding IsSigningIn, Converter={StaticResource BoolInvertConverter}}"/>
+                                <Button Content="切换账号" Padding="20,6" Margin="0,0,8,0"
+                                        Command="{Binding SignInCommand}"
+                                        Visibility="{Binding IsProviderSignedIn, Converter={StaticResource BoolToVisibilityConverter}}"
+                                        IsEnabled="{Binding IsSigningIn, Converter={StaticResource BoolInvertConverter}}"/>
+                                <Button Content="退出登录" Padding="20,6" Margin="0,0,8,0"
+                                        Command="{Binding SignOutCommand}"
+                                        Visibility="{Binding IsProviderSignedIn, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <Button.Foreground>
+                                        <SolidColorBrush Color="#E74856"/>
+                                    </Button.Foreground>
+                                </Button>
+                                <Button Content="取消" Padding="20,6"
+                                        Command="{Binding CancelSignInCommand}"
+                                        IsEnabled="{Binding IsSigningIn}"/>
+                            </StackPanel>
+                            <Button Content="清空" Padding="20,6" HorizontalAlignment="Right"
+                                    Command="{Binding ClearAuthLogCommand}"
+                                    IsEnabled="{Binding IsSigningIn, Converter={StaticResource BoolInvertConverter}}"/>
+                        </Grid>
+                        <ScrollViewer MaxHeight="160" VerticalScrollBarVisibility="Auto"
+                                      Visibility="{Binding AuthLogLines.Count, Converter={StaticResource NonZeroToVisibilityConverter}}">
+                            <ItemsControl ItemsSource="{Binding AuthLogLines}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding}" FontFamily="Consolas,微软雅黑" FontSize="12"
+                                                   TextWrapping="Wrap" Margin="0,1"
+                                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </StackPanel>
+                </Border>
+
+                <!-- R2 凭证表单 -->
+                <Border CornerRadius="10" Padding="16" Margin="0,0,0,8"
+                        BorderBrush="{DynamicResource SurfaceStrokeColorDefaultBrush}" BorderThickness="1"
+                        Visibility="{Binding SelectedProvider, Converter={StaticResource EqualityToVisibilityConverter}, ConverterParameter=r2}">
+                    <Border.Background>
+                        <SolidColorBrush Color="{DynamicResource CardBackgroundFillColorDefault}" Opacity="0.45"/>
+                    </Border.Background>
+                    <StackPanel>
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="130"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Account ID *" VerticalAlignment="Center" FontSize="12" Margin="0,4"/>
+                            <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding R2AccountId, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" Margin="0,4"/>
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Access Key ID *" VerticalAlignment="Center" FontSize="12" Margin="0,4"/>
+                            <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding R2AccessKeyId, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" Margin="0,4"/>
+                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Secret Key *" VerticalAlignment="Center" FontSize="12" Margin="0,4"/>
+                            <PasswordBox Grid.Row="2" Grid.Column="1" x:Name="R2SecretBox" Padding="8,6" Margin="0,4"
+                                         PasswordChanged="R2SecretBox_PasswordChanged"/>
+                            <TextBlock Grid.Row="3" Grid.Column="0" Text="Bucket *" VerticalAlignment="Center" FontSize="12" Margin="0,4"/>
+                            <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding R2Bucket, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" Margin="0,4"/>
+                            <TextBlock Grid.Row="4" Grid.Column="0" Text="Key Prefix" VerticalAlignment="Center" FontSize="12" Margin="0,4"/>
+                            <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding R2KeyPrefix, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" Margin="0,4"/>
+                            <TextBlock Grid.Row="5" Grid.Column="0" Text="Endpoint" VerticalAlignment="Center" FontSize="12" Margin="0,4"/>
+                            <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding R2Endpoint, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" Margin="0,4"/>
+                        </Grid>
+                        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                            <Button Content="保存 R2 凭证并切换" Padding="20,6" Margin="0,0,8,0"
+                                    Command="{Binding SaveR2Command}"/>
+                            <Button Content="清除凭证" Padding="20,6"
+                                    Command="{Binding SignOutCommand}" CommandParameter="r2"
+                                    Visibility="{Binding IsProviderSignedIn, Converter={StaticResource BoolToVisibilityConverter}}">
+                                <Button.Foreground>
+                                    <SolidColorBrush Color="#E74856"/>
+                                </Button.Foreground>
+                            </Button>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- S3 凭证表单 -->
+                <Border CornerRadius="10" Padding="16" Margin="0,0,0,8"
+                        BorderBrush="{DynamicResource SurfaceStrokeColorDefaultBrush}" BorderThickness="1"
+                        Visibility="{Binding SelectedProvider, Converter={StaticResource EqualityToVisibilityConverter}, ConverterParameter=s3}">
+                    <Border.Background>
+                        <SolidColorBrush Color="{DynamicResource CardBackgroundFillColorDefault}" Opacity="0.45"/>
+                    </Border.Background>
+                    <StackPanel>
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="130"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Access Key ID *" VerticalAlignment="Center" FontSize="12" Margin="0,4"/>
+                            <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding S3AccessKeyId, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" Margin="0,4"/>
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Secret Key *" VerticalAlignment="Center" FontSize="12" Margin="0,4"/>
+                            <PasswordBox Grid.Row="1" Grid.Column="1" x:Name="S3SecretBox" Padding="8,6" Margin="0,4"
+                                         PasswordChanged="S3SecretBox_PasswordChanged"/>
+                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Bucket *" VerticalAlignment="Center" FontSize="12" Margin="0,4"/>
+                            <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding S3Bucket, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" Margin="0,4"/>
+                            <TextBlock Grid.Row="3" Grid.Column="0" Text="Endpoint *" VerticalAlignment="Center" FontSize="12" Margin="0,4"/>
+                            <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding S3Endpoint, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" Margin="0,4"/>
+                            <TextBlock Grid.Row="4" Grid.Column="0" Text="Region *" VerticalAlignment="Center" FontSize="12" Margin="0,4"/>
+                            <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding S3Region, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" Margin="0,4"/>
+                            <TextBlock Grid.Row="5" Grid.Column="0" Text="Key Prefix" VerticalAlignment="Center" FontSize="12" Margin="0,4"/>
+                            <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding S3KeyPrefix, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" Margin="0,4"/>
+                            <TextBlock Grid.Row="6" Grid.Column="0" Text="CA 证书" VerticalAlignment="Center" FontSize="12" Margin="0,4"/>
+                            <StackPanel Grid.Row="6" Grid.Column="1" Orientation="Horizontal" Margin="0,4">
+                                <TextBox Text="{Binding S3CaCertPath}" IsReadOnly="True" Width="220" Padding="8,6" Margin="0,0,8,0"/>
+                                <Button Content="选择" Padding="12,6" Command="{Binding BrowseCaCertCommand}"/>
+                            </StackPanel>
+                            <StackPanel Grid.Row="7" Grid.Column="1" Orientation="Horizontal" Margin="0,4">
+                                <CheckBox Content="携带签名载荷" IsChecked="{Binding S3SignPayload}" Margin="0,0,16,0"/>
+                                <CheckBox Content="允许 HTTP" IsChecked="{Binding S3AllowInsecureHttp}" Margin="0,0,16,0"/>
+                                <CheckBox Content="跳过 TLS 校验" IsChecked="{Binding S3AllowInsecureTls}"/>
+                            </StackPanel>
+                        </Grid>
+                        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                            <Button Content="保存 S3 凭证并切换" Padding="20,6" Margin="0,0,8,0"
+                                    Command="{Binding SaveS3Command}"/>
+                            <Button Content="清除凭证" Padding="20,6"
+                                    Command="{Binding SignOutCommand}" CommandParameter="s3"
+                                    Visibility="{Binding IsProviderSignedIn, Converter={StaticResource BoolToVisibilityConverter}}">
+                                <Button.Foreground>
+                                    <SolidColorBrush Color="#E74856"/>
+                                </Button.Foreground>
+                            </Button>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
 
             <Border CornerRadius="10" Padding="16" Margin="0,0,0,8"
                     BorderBrush="{DynamicResource SurfaceStrokeColorDefaultBrush}" BorderThickness="1">
@@ -84,8 +257,8 @@
                             </Button.Background>
                         </Button>
                     </Grid>
-                    <TextBlock Text="暂无已重定向游戏：启用云存档后进游戏存一次档即会出现在列表"
-                               FontSize="12"
+                    <TextBlock Text="{Binding EmptyHint}"
+                                FontSize="12"
                                Foreground="{DynamicResource TextFillColorSecondaryBrush}"
                                Visibility="{Binding RedirectedGames.Count, Converter={StaticResource ZeroToVisibilityConverter}}"/>
                     <ItemsControl ItemsSource="{Binding RedirectedGames}"

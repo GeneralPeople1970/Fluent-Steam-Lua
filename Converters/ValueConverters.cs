@@ -113,6 +113,39 @@ public class EqualityToVisibilityConverter : IValueConverter
     }
 }
 
+public class StringNotEmptyToVisibilityConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        return value is string s && !string.IsNullOrEmpty(s) ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        return Binding.DoNothing;
+    }
+}
+
+public class OAuthProviderVisibilityConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        if (value is string s && parameter is string p)
+        {
+            foreach (var id in p.Split('|'))
+            {
+                if (s == id) return Visibility.Visible;
+            }
+        }
+        return Visibility.Collapsed;
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        return Binding.DoNothing;
+    }
+}
+
 public class BoolToRunStopConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)

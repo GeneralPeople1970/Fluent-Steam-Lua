@@ -12,14 +12,29 @@ public sealed record CloudSaveStatus(
     bool CloudEnabled,
     string SyncPath);
 
-public sealed record RedirectedApp(int AppId, string SaveDir, DateTime? LastSaveTime);
+public sealed record RedirectedApp(
+    int AppId, string SaveDir, DateTime? LastSaveTime,
+    string? AccountId = null, string? RemoteId = null, string? WebUrl = null);
 
 public sealed record MigrateResult(int MovedFiles, long MovedBytes, List<string> FailedFiles);
 
-// 删除目标种类：sync=重定向存档目录，cache=DLL 本地缓存，userdata=Steam 用户数据
-public sealed record DeleteTarget(string Kind, string AccountId, string Path, int FileCount, long TotalBytes);
+// 删除目标种类：sync=重定向存档目录，cache=DLL 本地缓存，userdata=Steam 用户数据，cloud=云端远端目录
+public sealed record DeleteTarget(
+    string Kind, string AccountId, string Path, int FileCount, long TotalBytes, string? Provider = null);
 
 public sealed record DeletePreview(int AppId, List<DeleteTarget> Targets, string BackupDir);
+
+public sealed record CloudProviderOption(string Id, string DisplayName);
+
+public sealed record R2Credentials(
+    string AccountId, string AccessKeyId, string SecretAccessKey,
+    string Bucket, string KeyPrefix = "", string Endpoint = "");
+
+public sealed record S3Credentials(
+    string AccessKeyId, string SecretAccessKey, string Bucket,
+    string Endpoint, string Region, string KeyPrefix = "",
+    bool SignPayload = false, bool AllowInsecureHttp = false,
+    bool AllowInsecureTls = false, string CaCertPath = "");
 
 public interface ICloudRedirectService
 {
@@ -27,11 +42,24 @@ public interface ICloudRedirectService
     Task EnableAsync(string? syncPath, IProgress<string>? status, CancellationToken ct = default);
     Task DisableAsync();
     Task SetSyncPathAsync(string path);
-    List<RedirectedApp> GetRedirectedApps();
+    Task<List<RedirectedApp>> GetRedirectedAppsAsync(IProgress<string>? progress = null, CancellationToken ct = default);
     Task<MigrateResult> MigrateSavesAsync(string oldPath, string newPath, IProgress<string>? status, CancellationToken ct = default);
     string GetDefaultSyncPath();
-    DeletePreview PreviewAppDelete(int appId);
+    Task<DeletePreview> PreviewAppDeleteAsync(int appId, CancellationToken ct = default);
     Task DeleteAppSavesAsync(DeletePreview preview, IProgress<string>? status, CancellationToken ct = default);
+    // 云端源下打开路径的目标地址；本地源返回空，由调用方走目录打开
+    string GetCloudConsoleUrl(int appId);
+    IReadOnlyList<CloudProviderOption> ProviderOptions { get; }
+    string GetCloudProvider();
+    void SetCloudProvider(string provider);
+    string GetTokenPath(string provider);
+    (bool Ok, string Message) CheckOAuthToken(string provider);
+    // 退出登录：删除 token/凭证文件；DLL 共用同一文件，退出后该源同步即失效
+    void SignOut(string provider);
+    string SaveR2Credentials(R2Credentials cred);
+    R2Credentials? LoadR2Credentials();
+    string SaveS3Credentials(S3Credentials cred);
+    S3Credentials? LoadS3Credentials();
 }
 
 public class CloudRedirectService : ICloudRedirectService
@@ -40,12 +68,17 @@ public class CloudRedirectService : ICloudRedirectService
     private const string EmbeddedResourceName = "SteamLuaManager.Resources.CloudRedirectDll.zip";
 
     private readonly ISteamPathService _steamPathService;
+    private readonly CloudProviderStore _store;
     private readonly object _embedLock = new();
     private byte[]? _embeddedDll;
+    // 最近一次云端名单：打开控制台与删除时定位远端目录；切源后刷新覆盖，不做跨源保留
+    private readonly Dictionary<int, List<CloudAppEntry>> _cloudEntries = new();
+    private readonly object _cloudLock = new();
 
     public CloudRedirectService(ISteamPathService steamPathService)
     {
         _steamPathService = steamPathService;
+        _store = new CloudProviderStore(LoadR2Credentials, LoadS3Credentials, GetTokenPath);
     }
 
     private string ConfigDir =>
@@ -98,6 +131,10 @@ public class CloudRedirectService : ICloudRedirectService
         var steamPath = ResolveSteamPath();
         if (string.IsNullOrEmpty(steamPath))
             throw new InvalidOperationException("未检测到 Steam 路径，无法启用云存档");
+        // 未显式传路径时优先沿用 config.json 里已有的，不存在才回默认；
+        // 否则每次开关都会把用户自定义目录洗成默认目录
+        if (string.IsNullOrWhiteSpace(syncPath))
+            syncPath = GetConfiguredSyncPath();
         if (string.IsNullOrWhiteSpace(syncPath))
             syncPath = DefaultSyncPath(steamPath);
 
@@ -321,7 +358,7 @@ public class CloudRedirectService : ICloudRedirectService
         LogService.Info("云存档", $"云存档 DLL 已部署到 {target}");
     }
 
-    private void WriteRedirectConfig(string syncPath)
+    private void WriteRedirectConfig(string syncPath, string? provider = null)
     {
         try
         {
@@ -344,8 +381,10 @@ public class CloudRedirectService : ICloudRedirectService
                 root = new JsonObject();
             }
 
-            // 仅写自有键，未知键原样保留；成就与时长跟随云端同步；DLL 自更新关闭以免覆盖已部署版本
-            root["provider"] = "folder";
+            // 仅写自有键，未知键原样保留；成就与时长跟随云端同步；DLL 自更新关闭以免覆盖已部署版本；
+            // provider 传空=沿用现有值，免得重启用把已选云端打回本地
+            var current = root["provider"]?.GetValue<string>();
+            root["provider"] = string.IsNullOrEmpty(provider) ? (string.IsNullOrEmpty(current) ? "folder" : current) : provider;
             root["sync_path"] = syncPath;
             root["sync_achievements"] = true;
             root["sync_playtime"] = true;
@@ -361,10 +400,267 @@ public class CloudRedirectService : ICloudRedirectService
         }
     }
 
-    // 已重定向应用：文件夹模式落盘布局为 <sync_path>\<accountId>\<appid>；
-    // 账号目录只认数字，appid 为 0 的是账号级元数据目录，跳过；同 app 取首个命中的目录
-    public List<RedirectedApp> GetRedirectedApps()
+    // ---- 云端提供商 ----
+
+    public IReadOnlyList<CloudProviderOption> ProviderOptions { get; } = new List<CloudProviderOption>
     {
+        new("folder", "本地目录"),
+        new("gdrive", "Google Drive"),
+        new("onedrive", "OneDrive"),
+        new("r2", "Cloudflare R2"),
+        new("s3", "S3 兼容存储"),
+    }.AsReadOnly();
+
+    private static bool IsKnownProvider(string? id) =>
+        id is "folder" or "gdrive" or "onedrive" or "r2" or "s3";
+
+    // 当前提供商：读不到/读到未知值一律回本地目录，保证 DLL 侧永远有确定行为
+    public string GetCloudProvider()
+    {
+        try
+        {
+            var configPath = Path.Combine(ConfigDir, "config.json");
+            if (!File.Exists(configPath)) return "folder";
+            using var doc = JsonDocument.Parse(File.ReadAllText(configPath));
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return "folder";
+            if (doc.RootElement.TryGetProperty("provider", out var p) &&
+                p.ValueKind == JsonValueKind.String && IsKnownProvider(p.GetString()))
+                return p.GetString()!;
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("云存档", $"读取提供商配置失败: {ex.Message}");
+        }
+        return "folder";
+    }
+
+    // 切换提供商：只写 provider + token_path（及各源路径注册表），不动其他键；
+    // 切到云端后仍需登录/填凭证才算真正可用，状态由 CheckOAuthToken / 凭证校验体现
+    public void SetCloudProvider(string provider)
+    {
+        if (!IsKnownProvider(provider))
+            throw new InvalidOperationException($"未知的云端提供商：{provider}");
+        try
+        {
+            Directory.CreateDirectory(ConfigDir);
+            var configPath = Path.Combine(ConfigDir, "config.json");
+            JsonObject root;
+            if (File.Exists(configPath))
+            {
+                try
+                {
+                    root = JsonNode.Parse(File.ReadAllText(configPath))?.AsObject() ?? new JsonObject();
+                }
+                catch
+                {
+                    root = new JsonObject();
+                }
+            }
+            else
+            {
+                root = new JsonObject();
+            }
+
+            root["provider"] = provider;
+            var tokenPath = GetTokenPath(provider);
+            if (!string.IsNullOrEmpty(tokenPath))
+                root["token_path"] = tokenPath;
+
+            var registry = new JsonObject();
+            if (root["token_paths"] is JsonObject existing)
+            {
+                foreach (var kv in existing)
+                {
+                    if (kv.Value?.GetValueKind() == JsonValueKind.String)
+                        registry[kv.Key] = kv.Value!.GetValue<string>();
+                }
+            }
+            if (!string.IsNullOrEmpty(tokenPath))
+                registry[provider] = tokenPath;
+            root["token_paths"] = registry;
+
+            var tmp = configPath + ".new";
+            File.WriteAllText(tmp, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            File.Move(tmp, configPath, overwrite: true);
+            LogService.Info("云存档", $"云端提供商已切换为 {provider}");
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"切换云端提供商失败：{ex.Message}", ex);
+        }
+    }
+
+    // 各源凭证/ token 默认落点，与上游 companion 路径一致，DLL 与官方客户端互认
+    public string GetTokenPath(string provider)
+    {
+        try
+        {
+            var configPath = Path.Combine(ConfigDir, "config.json");
+            if (File.Exists(configPath))
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(configPath));
+                if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                    doc.RootElement.TryGetProperty("token_paths", out var reg) &&
+                    reg.ValueKind == JsonValueKind.Object &&
+                    reg.TryGetProperty(provider, out var p) &&
+                    p.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(p.GetString()))
+                    return p.GetString()!;
+            }
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("云存档", $"读取 token 路径注册表失败: {ex.Message}");
+        }
+        return provider switch
+        {
+            "gdrive" => Path.Combine(ConfigDir, "google_tokens.json"),
+            "onedrive" => Path.Combine(ConfigDir, "onedrive_tokens.json"),
+            "r2" => Path.Combine(ConfigDir, "r2_credentials.json"),
+            "s3" => Path.Combine(ConfigDir, "s3_credentials.json"),
+            _ => string.Empty,
+        };
+    }
+
+    // OAuth 类源看 refresh_token 是否存在；R2/S3 看必填字段是否齐
+    public (bool Ok, string Message) CheckOAuthToken(string provider)
+    {
+        if (provider is not ("gdrive" or "onedrive"))
+            return (false, "该源无需 OAuth 登录");
+        return CloudOAuthService.CheckTokenStatus(GetTokenPath(provider)) switch
+        {
+            (true, var msg) => (true, msg),
+            (false, var msg) => (false, msg),
+        };
+    }
+
+    // 退出登录：OAuth 删 token 文件，R2/S3 删凭证文件；文件不存在视为未登录，直接报错
+    public void SignOut(string provider)
+    {
+        var path = provider switch
+        {
+            "gdrive" or "onedrive" => GetTokenPath(provider),
+            "r2" => Path.Combine(ConfigDir, "r2_credentials.json"),
+            "s3" => Path.Combine(ConfigDir, "s3_credentials.json"),
+            _ => throw new InvalidOperationException("本地目录无需退出登录"),
+        };
+        if (string.IsNullOrEmpty(path) || !File.Exists(path))
+            throw new InvalidOperationException("该源当前未登录，无需退出");
+        try
+        {
+            File.Delete(path);
+            LogService.Info("云存档", $"已退出登录：{provider}");
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"退出登录失败：{ex.Message}", ex);
+        }
+    }
+
+    public string SaveR2Credentials(R2Credentials cred)
+    {
+        if (string.IsNullOrWhiteSpace(cred.AccountId) || string.IsNullOrWhiteSpace(cred.AccessKeyId) ||
+            string.IsNullOrWhiteSpace(cred.SecretAccessKey) || string.IsNullOrWhiteSpace(cred.Bucket))
+            throw new InvalidOperationException("R2 缺必填项：account_id / access_key_id / secret_access_key / bucket");
+        var obj = new JsonObject
+        {
+            ["account_id"] = cred.AccountId.Trim(),
+            ["access_key_id"] = cred.AccessKeyId.Trim(),
+            ["secret_access_key"] = cred.SecretAccessKey,
+            ["bucket"] = cred.Bucket.Trim(),
+        };
+        if (!string.IsNullOrWhiteSpace(cred.KeyPrefix)) obj["key_prefix"] = cred.KeyPrefix.Trim();
+        if (!string.IsNullOrWhiteSpace(cred.Endpoint)) obj["endpoint"] = cred.Endpoint.Trim();
+        var path = Path.Combine(ConfigDir, "r2_credentials.json");
+        if (!CloudCredentialStore.WriteJson(path, obj.ToJsonString(new JsonSerializerOptions { WriteIndented = true })))
+            throw new InvalidOperationException("R2 凭证保存失败，请检查目录写入权限");
+        SetCloudProvider("r2");
+        LogService.Info("云存档", "R2 凭证已保存并切换提供商");
+        return path;
+    }
+
+    public R2Credentials? LoadR2Credentials()
+    {
+        try
+        {
+            var json = CloudCredentialStore.ReadJson(Path.Combine(ConfigDir, "r2_credentials.json"));
+            if (string.IsNullOrEmpty(json)) return null;
+            using var doc = JsonDocument.Parse(json);
+            var r = doc.RootElement;
+            string Get(string key) => r.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+            var account = Get("account_id");
+            var key = Get("access_key_id");
+            var bucket = Get("bucket");
+            if (account.Length == 0 || key.Length == 0 || bucket.Length == 0) return null;
+            return new R2Credentials(account, key, Get("secret_access_key"), bucket, Get("key_prefix"), Get("endpoint"));
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("云存档", $"读取 R2 凭证失败: {ex.Message}");
+            return null;
+        }
+    }
+
+    public string SaveS3Credentials(S3Credentials cred)
+    {
+        if (string.IsNullOrWhiteSpace(cred.AccessKeyId) || string.IsNullOrWhiteSpace(cred.SecretAccessKey) ||
+            string.IsNullOrWhiteSpace(cred.Bucket) || string.IsNullOrWhiteSpace(cred.Endpoint) ||
+            string.IsNullOrWhiteSpace(cred.Region))
+            throw new InvalidOperationException("S3 缺必填项：access_key_id / secret_access_key / bucket / endpoint / region");
+        var obj = new JsonObject
+        {
+            ["access_key_id"] = cred.AccessKeyId.Trim(),
+            ["secret_access_key"] = cred.SecretAccessKey,
+            ["bucket"] = cred.Bucket.Trim(),
+            ["endpoint"] = cred.Endpoint.Trim(),
+            ["region"] = cred.Region.Trim(),
+        };
+        if (!string.IsNullOrWhiteSpace(cred.KeyPrefix)) obj["key_prefix"] = cred.KeyPrefix.Trim();
+        if (cred.SignPayload) obj["sign_payload"] = true;
+        if (cred.AllowInsecureHttp) obj["allow_insecure_http"] = true;
+        if (cred.AllowInsecureTls) obj["allow_insecure_tls"] = true;
+        if (!string.IsNullOrWhiteSpace(cred.CaCertPath)) obj["ca_cert_path"] = cred.CaCertPath.Trim();
+        var path = Path.Combine(ConfigDir, "s3_credentials.json");
+        if (!CloudCredentialStore.WriteJson(path, obj.ToJsonString(new JsonSerializerOptions { WriteIndented = true })))
+            throw new InvalidOperationException("S3 凭证保存失败，请检查目录写入权限");
+        SetCloudProvider("s3");
+        LogService.Info("云存档", "S3 凭证已保存并切换提供商");
+        return path;
+    }
+
+    public S3Credentials? LoadS3Credentials()
+    {
+        try
+        {
+            var json = CloudCredentialStore.ReadJson(Path.Combine(ConfigDir, "s3_credentials.json"));
+            if (string.IsNullOrEmpty(json)) return null;
+            using var doc = JsonDocument.Parse(json);
+            var r = doc.RootElement;
+            string Get(string key) => r.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+            bool Flag(string key) => r.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.True;
+            var key = Get("access_key_id");
+            var bucket = Get("bucket");
+            var endpoint = Get("endpoint");
+            var region = Get("region");
+            if (key.Length == 0 || bucket.Length == 0 || endpoint.Length == 0 || region.Length == 0) return null;
+            return new S3Credentials(key, Get("secret_access_key"), bucket, endpoint, region,
+                Get("key_prefix"), Flag("sign_payload"), Flag("allow_insecure_http"),
+                Flag("allow_insecure_tls"), Get("ca_cert_path"));
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("云存档", $"读取 S3 凭证失败: {ex.Message}");
+            return null;
+        }
+    }
+
+    // 已重定向应用：本地源扫目录，云端源走远端列举；远端失败抛中文错，由调用方展示
+    public async Task<List<RedirectedApp>> GetRedirectedAppsAsync(
+        IProgress<string>? progress = null, CancellationToken ct = default)
+    {
+        var provider = GetCloudProvider();
+        if (provider != "folder")
+            return await GetCloudRedirectedAppsAsync(provider, progress, ct);
+        lock (_cloudLock) { _cloudEntries.Clear(); }
         var found = new Dictionary<int, RedirectedApp>();
         try
         {
@@ -385,7 +681,84 @@ public class CloudRedirectService : ICloudRedirectService
         {
             LogService.Warn("云存档", $"扫描已重定向游戏失败: {ex.Message}");
         }
+        LogService.Info("云存档", $"本地名单：{found.Count} 个");
         return found.OrderBy(kv => kv.Key).Select(kv => kv.Value).ToList();
+    }
+
+    // 云端名单：远端目录即真相，本地无对应目录；条目缓存供打开控制台与删除定位
+    private async Task<List<RedirectedApp>> GetCloudRedirectedAppsAsync(
+        string provider, IProgress<string>? progress, CancellationToken ct)
+    {
+        List<CloudAppEntry> entries;
+        try
+        {
+            entries = await _store.ListAppsAsync(provider, progress, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("云存档", $"读取云端名单失败: {ex.Message}");
+            throw new InvalidOperationException($"读取云端名单失败：{ex.Message}", ex);
+        }
+        var found = new Dictionary<int, RedirectedApp>();
+        lock (_cloudLock)
+        {
+            _cloudEntries.Clear();
+            foreach (var e in entries)
+            {
+                if (!_cloudEntries.TryGetValue(e.AppId, out var list))
+                    _cloudEntries[e.AppId] = list = new List<CloudAppEntry>();
+                if (!list.Any(x => x.AccountId == e.AccountId))
+                    list.Add(e);
+                found.TryAdd(e.AppId, new RedirectedApp(
+                    e.AppId, string.Empty, e.LastSaveTime, e.AccountId, e.RemoteId, e.WebUrl));
+            }
+        }
+        LogService.Info("云存档", $"云端名单：{provider} 下 {found.Count} 个");
+        return found.OrderBy(kv => kv.Key).Select(kv => kv.Value).ToList();
+    }
+
+    // 云端源下打开路径的目标地址：Drive 进目录页，OneDrive 用条目自带链接，R2 进面板，S3 拼桶浏览地址；
+    // 多账号取最近有存档时间的那个，最相关
+    public string GetCloudConsoleUrl(int appId)
+    {
+        List<CloudAppEntry>? list;
+        lock (_cloudLock) { _cloudEntries.TryGetValue(appId, out list); list = list?.ToList(); }
+        var entry = list?.OrderByDescending(e => e.LastSaveTime ?? DateTime.MinValue).FirstOrDefault();
+        if (entry == null) return string.Empty;
+        var provider = GetCloudProvider();
+        return provider switch
+        {
+            "gdrive" => string.IsNullOrEmpty(entry.RemoteId)
+                ? "https://drive.google.com/drive/search?q=CloudRedirect"
+                : $"https://drive.google.com/drive/folders/{entry.RemoteId}",
+            "onedrive" => entry.WebUrl ?? "https://onedrive.live.com/",
+            "r2" => $"https://dash.cloudflare.com/{entry.AccountId}/r2/overview",
+            "s3" => BuildS3BrowseUrl(entry),
+            _ => string.Empty,
+        };
+    }
+
+    // S3 无统一控制台：拼 endpoint + 桶 + 前缀的浏览器地址，能否打开取决于存储实现
+    private string BuildS3BrowseUrl(CloudAppEntry entry)
+    {
+        try
+        {
+            var cred = LoadS3Credentials();
+            if (cred == null || string.IsNullOrWhiteSpace(cred.Endpoint)) return string.Empty;
+            var endpoint = cred.Endpoint.Trim().TrimEnd('/');
+            if (!endpoint.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                endpoint = (cred.AllowInsecureHttp ? "http://" : "https://") + endpoint;
+            var prefix = string.IsNullOrWhiteSpace(cred.KeyPrefix) ? "CloudRedirect/" : cred.KeyPrefix.Trim().Trim('/') + "/";
+            return $"{endpoint}/{cred.Bucket.Trim()}/{prefix}{entry.AccountId}/{entry.AppId}/";
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 
     // 上次存档时间：appid 目录下 cn.cloudredirect 的修改时间；缺失返回空
@@ -402,8 +775,8 @@ public class CloudRedirectService : ICloudRedirectService
         }
     }
 
-    // 删除预览：收拢同一 appId 在所有账号下的三类目录并统计；只收录存在的目录
-    public DeletePreview PreviewAppDelete(int appId)
+    // 删除预览：收拢同一 appId 在所有账号下的三类本地目录并统计；云端源追加远端目标
+    public async Task<DeletePreview> PreviewAppDeleteAsync(int appId, CancellationToken ct = default)
     {
         var steamPath = ResolveSteamPath();
         if (string.IsNullOrEmpty(steamPath))
@@ -449,6 +822,58 @@ public class CloudRedirectService : ICloudRedirectService
                 targets.Add(CountTarget("userdata", accountId, userdataDir));
         }
 
+        // 云端源追加远端目标：本地缓存与 userdata 照常收拢，远端走在线统计；
+        // 名单缓存缺失（未刷新直接删除）则现查远端，避免漏删
+        var provider = GetCloudProvider();
+        if (provider != "folder")
+        {
+            List<CloudAppEntry>? cached;
+            lock (_cloudLock) { _cloudEntries.TryGetValue(appId, out cached); cached = cached?.ToList(); }
+            if (cached == null || cached.Count == 0)
+            {
+                List<CloudAppEntry> fresh;
+                try
+                {
+                    fresh = await _store.ListAppsAsync(provider, null, ct);
+                }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException($"读取云端存档信息失败：{ex.Message}", ex);
+                }
+                lock (_cloudLock)
+                {
+                    if (!_cloudEntries.TryGetValue(appId, out cached))
+                        _cloudEntries[appId] = cached = new List<CloudAppEntry>();
+                    foreach (var e in fresh.Where(e => e.AppId == appId))
+                    {
+                        if (!cached.Any(x => x.AccountId == e.AccountId))
+                            cached.Add(e);
+                    }
+                }
+            }
+            foreach (var e in cached)
+            {
+                CloudAppStats stats;
+                try
+                {
+                    stats = await _store.GetAppStatsAsync(provider, e.AccountId, appId, ct);
+                }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException($"读取云端存档信息失败：{ex.Message}", ex);
+                }
+                if (!accountIds.Contains(e.AccountId))
+                {
+                    accountIds.Add(e.AccountId);
+                    var userdataDir = Path.Combine(steamPath, "userdata", e.AccountId, appId.ToString());
+                    if (Directory.Exists(userdataDir))
+                        targets.Add(CountTarget("userdata", e.AccountId, userdataDir));
+                }
+                targets.Add(new DeleteTarget("cloud", e.AccountId, stats.DisplayPath,
+                    stats.FileCount, stats.TotalBytes, provider));
+            }
+        }
+
         // 兜底：只剩陈旧 userdata、同步目录与缓存都已不在的账号
         if (Directory.Exists(Path.Combine(steamPath, "userdata")))
         {
@@ -489,10 +914,11 @@ public class CloudRedirectService : ICloudRedirectService
         return new DeleteTarget(kind, accountId, path, count, bytes);
     }
 
-    // 先完整备份并验数，通过后才删原件；中途失败直接抛错，原件不动
+    // 先完整备份并验数，通过后才删原件；中途失败直接抛错，原件不动；
+    // 云端目标备份=下载到本地后验数，删除=调远端删除，备份恢复需手动上传回云端
     public Task DeleteAppSavesAsync(DeletePreview preview, IProgress<string>? status, CancellationToken ct = default)
     {
-        return Task.Run(() =>
+        return Task.Run(async () =>
         {
             Directory.CreateDirectory(preview.BackupDir);
             var copied = new List<(DeleteTarget Target, string BackupPath)>();
@@ -503,18 +929,35 @@ public class CloudRedirectService : ICloudRedirectService
                 ct.ThrowIfCancellationRequested();
                 status?.Report($"正在备份 {KindLabel(t.Kind)}…");
                 var dest = Path.Combine(preview.BackupDir, t.AccountId, $"{t.Kind}_{i}");
-                CopyDirectory(t.Path, dest, ct);
-                var backed = CountTarget(t.Kind, t.AccountId, dest);
-                if (backed.FileCount != t.FileCount)
-                    throw new InvalidOperationException($"备份不完整（{KindLabel(t.Kind)}：应备 {t.FileCount} 个，实备 {backed.FileCount} 个），已中止删除，原件未动");
-                copied.Add((t, dest));
+                if (t.Kind == "cloud")
+                {
+                    if (string.IsNullOrEmpty(t.Provider))
+                        throw new InvalidOperationException("云端删除目标缺提供商信息，已中止删除，原件未动");
+                    var fresh = await _store.GetAppStatsAsync(t.Provider, t.AccountId, preview.AppId, ct);
+                    var downloaded = await _store.DownloadAppAsync(t.Provider, t.AccountId, preview.AppId, dest, status, ct);
+                    if (downloaded != fresh.FileCount)
+                        throw new InvalidOperationException(
+                            $"备份不完整（{KindLabel(t.Kind)}：远端 {fresh.FileCount} 个，实备 {downloaded} 个），已中止删除，原件未动");
+                    copied.Add((new DeleteTarget(t.Kind, t.AccountId, t.Path, downloaded, fresh.TotalBytes, t.Provider), dest));
+                }
+                else
+                {
+                    CopyDirectory(t.Path, dest, ct);
+                    var backed = CountTarget(t.Kind, t.AccountId, dest);
+                    if (backed.FileCount != t.FileCount)
+                        throw new InvalidOperationException($"备份不完整（{KindLabel(t.Kind)}：应备 {t.FileCount} 个，实备 {backed.FileCount} 个），已中止删除，原件未动");
+                    copied.Add((t, dest));
+                }
             }
 
+            var hasCloud = copied.Any(c => c.Target.Kind == "cloud");
             var info = new JsonObject
             {
                 ["appId"] = preview.AppId,
                 ["timestamp"] = DateTime.Now.ToString("o"),
-                ["note"] = "删除存档前自动备份；恢复需手动拷回对应目录，暂无一键恢复",
+                ["note"] = hasCloud
+                    ? "云端存档删除前自动备份（已下载到本地）；恢复需手动上传回云端对应目录，暂无一键恢复"
+                    : "删除存档前自动备份；恢复需手动拷回对应目录，暂无一键恢复",
                 ["targets"] = new JsonArray(copied.Select(c =>
                     new JsonObject
                     {
@@ -535,8 +978,16 @@ public class CloudRedirectService : ICloudRedirectService
                 status?.Report($"正在删除 {KindLabel(t.Kind)}…");
                 try
                 {
-                    if (Directory.Exists(t.Path))
+                    if (t.Kind == "cloud")
+                    {
+                        var r = await _store.DeleteAppAsync(t.Provider!, t.AccountId, preview.AppId, status, ct);
+                        if (!string.IsNullOrEmpty(r.Error))
+                            errors.Add($"{KindLabel(t.Kind)}：{r.Error}");
+                    }
+                    else if (Directory.Exists(t.Path))
+                    {
                         Directory.Delete(t.Path, true);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -553,6 +1004,7 @@ public class CloudRedirectService : ICloudRedirectService
         "sync" => "重定向存档",
         "cache" => "DLL 本地缓存",
         "userdata" => "Steam 用户数据",
+        "cloud" => "云端存档",
         _ => kind
     };
 

@@ -34,6 +34,9 @@ public partial class CloudSaveViewModel : ObservableObject
     [ObservableProperty]
     private string _statusMessage = "";
 
+    [ObservableProperty]
+    private string _emptyHint = "暂无已重定向游戏：启用云存档后进游戏存一次档即会出现在列表";
+
     public CloudSaveViewModel(
         ICloudRedirectService cloudService,
         ISteamPathService steamPathService,
@@ -48,6 +51,7 @@ public partial class CloudSaveViewModel : ObservableObject
         _dialogService = dialogService;
         _steamApiService = steamApiService;
         _luaFileManager = luaFileManager;
+        CloudProviders = new System.Collections.Generic.List<CloudProviderOption>(_cloudService.ProviderOptions);
     }
 
     public void OnNavigatedTo() => _ = RefreshAsync();
@@ -56,10 +60,25 @@ public partial class CloudSaveViewModel : ObservableObject
     private async Task RefreshAsync()
     {
         if (IsBusy) return;
+        _refreshCts?.Cancel();
+        _refreshCts?.Dispose();
+        _refreshCts = new CancellationTokenSource();
+        // 云端名单是 N+1 远端请求，设总超时兜底，避免无限挂起
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(_refreshCts.Token, timeout.Token);
         try
         {
             IsBusy = true;
-            await RefreshCoreAsync();
+            await RefreshCoreAsync(linked.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // 被新切换中断静默让路；超时才提示
+            if (timeout.IsCancellationRequested)
+            {
+                StatusMessage = "刷新超时，请检查网络后重试";
+                LogService.Warn("云存档", "刷新云端名单超时");
+            }
         }
         finally
         {
@@ -68,7 +87,7 @@ public partial class CloudSaveViewModel : ObservableObject
     }
 
     // 内部调用走这里：调用方已持有 IsBusy，不再经过入口守卫
-    private async Task RefreshCoreAsync()
+    private async Task RefreshCoreAsync(CancellationToken ct = default)
     {
         try
         {
@@ -78,9 +97,35 @@ public partial class CloudSaveViewModel : ObservableObject
             try { IsCloudEnabled = st.CloudEnabled; }
             finally { _syncingCloudEnabled = false; }
             SyncPathText = string.IsNullOrEmpty(st.SyncPath) ? "未配置" : st.SyncPath;
+            RefreshProviderBlock();
+            EmptyHint = SelectedProvider == "folder"
+                ? "暂无已重定向游戏：启用云存档后进游戏存一次档即会出现在列表"
+                : "暂无云端存档：该源下尚未同步过，或登录/凭证未配置";
+            RefreshProviderStatus();
+            var baseStatus = StatusMessage;
 
             // 名单与封面沿用主页逻辑：先用 Lua 名单与本地缓存秒填，缺的再走网络补齐
-            var scanned = _cloudService.GetRedirectedApps();
+            var progress = new Progress<string>(msg => StatusMessage = msg);
+            List<RedirectedApp> scanned;
+            try
+            {
+                scanned = await _cloudService.GetRedirectedAppsAsync(progress, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // 名单失败不清旧源残留会误导，清空后报错；认证状态拼在后面保留
+                _saveDirs.Clear();
+                RedirectedGames.Clear();
+                StatusMessage = string.IsNullOrEmpty(baseStatus)
+                    ? $"刷新名单失败：{ex.Message}"
+                    : $"刷新名单失败：{ex.Message}（{baseStatus}）";
+                LogService.Warn("云存档", $"刷新名单失败: {ex.Message}");
+                return;
+            }
             var luaById = new Dictionary<int, GameInfo>();
             try
             {
@@ -108,8 +153,13 @@ public partial class CloudSaveViewModel : ObservableObject
             RedirectedGames.Clear();
             foreach (var g in list)
                 RedirectedGames.Add(g);
-            StatusMessage = string.Empty;
+            // 成功恢复认证状态行；失败分支已提前返回，不会被覆盖
+            StatusMessage = baseStatus;
             _ = RefreshMissingInfoAsync(list);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -136,6 +186,18 @@ public partial class CloudSaveViewModel : ObservableObject
     {
         try
         {
+            // 云端源无本地目录，打开对应网页控制台
+            if (_cloudService.GetCloudProvider() != "folder")
+            {
+                var url = _cloudService.GetCloudConsoleUrl(appId);
+                if (string.IsNullOrEmpty(url))
+                {
+                    StatusMessage = "无法定位云端目录，请先刷新名单";
+                    return;
+                }
+                Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
+                return;
+            }
             if (!_saveDirs.TryGetValue(appId, out var dir) || !Directory.Exists(dir))
             {
                 StatusMessage = "存档目录不存在";
@@ -162,10 +224,12 @@ public partial class CloudSaveViewModel : ObservableObject
             return;
         }
 
+        // 提供商在 preview 前捕获：确认文案、删除语义、完成提示与本次 preview 口径一致
+        var isCloud = _cloudService.GetCloudProvider() != "folder";
         DeletePreview preview;
         try
         {
-            preview = await Task.Run(() => _cloudService.PreviewAppDelete(game.AppId));
+            preview = await Task.Run(() => _cloudService.PreviewAppDeleteAsync(game.AppId));
         }
         catch (Exception ex)
         {
@@ -180,7 +244,10 @@ public partial class CloudSaveViewModel : ObservableObject
         }
 
         var displayName = string.IsNullOrEmpty(game.GameName) ? game.AppId.ToString() : game.GameName;
-        if (!await _dialogService.ShowDeleteSavesConfirmAsync(displayName, game.AppId, preview.Targets, preview.BackupDir))
+        var confirmNote = isCloud
+            ? "注：云端源下将删除远端存档（本地 DLL 缓存与 Steam 用户数据一并清理），删除前自动下载备份到本地。"
+            : null;
+        if (!await _dialogService.ShowDeleteSavesConfirmAsync(displayName, game.AppId, preview.Targets, preview.BackupDir, confirmNote))
             return;
 
         try
@@ -190,7 +257,9 @@ public partial class CloudSaveViewModel : ObservableObject
             await _cloudService.DeleteAppSavesAsync(preview, progress);
             await RefreshCoreAsync();
             await _dialogService.ShowAlertAsync("删除完成",
-                $"已删除《{displayName}》的全部存档。\n\n备份位于：\n{preview.BackupDir}\n恢复需手动拷回对应目录。");
+                isCloud
+                    ? $"已删除《{displayName}》的全部存档（含云端远端）。\n\n备份位于：\n{preview.BackupDir}\n恢复需手动上传回云端对应目录。"
+                    : $"已删除《{displayName}》的全部存档。\n\n备份位于：\n{preview.BackupDir}\n恢复需手动拷回对应目录。");
         }
         catch (Exception ex)
         {
@@ -318,6 +387,358 @@ public partial class CloudSaveViewModel : ObservableObject
             return;
         }
         await ApplyNewSyncPathAsync(def);
+    }
+
+    // ========== 云端提供商（与上游 companion 同契约，唯一真相在 config.json） ==========
+
+    public System.Collections.Generic.List<CloudProviderOption> CloudProviders { get; }
+
+    [ObservableProperty]
+    private string _selectedProvider = "folder";
+
+    [ObservableProperty]
+    private bool _isProviderSignedIn;
+
+    [ObservableProperty]
+    private bool _isSigningIn;
+
+    public System.Collections.ObjectModel.ObservableCollection<string> AuthLogLines { get; } = new();
+
+    // R2 表单
+    [ObservableProperty] private string _r2AccountId = "";
+    [ObservableProperty] private string _r2AccessKeyId = "";
+    [ObservableProperty] private string _r2SecretKey = "";
+    [ObservableProperty] private string _r2Bucket = "";
+    [ObservableProperty] private string _r2KeyPrefix = "";
+    [ObservableProperty] private string _r2Endpoint = "";
+
+    // S3 表单
+    [ObservableProperty] private string _s3AccessKeyId = "";
+    [ObservableProperty] private string _s3SecretKey = "";
+    [ObservableProperty] private string _s3Bucket = "";
+    [ObservableProperty] private string _s3Endpoint = "";
+    [ObservableProperty] private string _s3Region = "";
+    [ObservableProperty] private string _s3KeyPrefix = "";
+    [ObservableProperty] private string _s3CaCertPath = "";
+    [ObservableProperty] private bool _s3SignPayload;
+    [ObservableProperty] private bool _s3AllowInsecureHttp;
+    [ObservableProperty] private bool _s3AllowInsecureTls;
+
+    private bool _syncingProvider;
+    private CancellationTokenSource? _signInCts;
+    private CancellationTokenSource? _refreshCts;
+    private int _authLogGeneration;
+
+    partial void OnSelectedProviderChanged(string value)
+    {
+        if (_syncingProvider) return;
+        try
+        {
+            _cloudService.SetCloudProvider(value);
+            LogService.Info("云存档", $"云端提供商已切换为{ProviderDisplayName(value)}，重启 Steam 后生效");
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = ex.Message;
+            LogService.Warn("云存档", $"切换提供商失败: {ex.Message}");
+            RefreshProviderStatus();
+            return;
+        }
+        RefreshProviderStatus();
+        // 切源即切名单：中断进行中的刷新，以新源为准重拉
+        _ = RefreshAfterProviderSwitchAsync();
+        // DLL 启动时读配置，切源必须重启 Steam 才生效；连点切换只弹一次
+        _ = PromptRestartAfterSwitchAsync("云端提供商已切换");
+    }
+
+    private bool _restartPromptShowing;
+
+    private async Task PromptRestartAfterSwitchAsync(string doneMessage)
+    {
+        if (_restartPromptShowing) return;
+        _restartPromptShowing = true;
+        try { await PromptRestartSteamAsync(doneMessage); }
+        finally { _restartPromptShowing = false; }
+    }
+
+    // 等待进行中的刷新让路，避免 IsBusy 守卫吞掉本次切换；5 秒等不到则放弃，用户可手动刷新
+    private async Task RefreshAfterProviderSwitchAsync()
+    {
+        _refreshCts?.Cancel();
+        for (var i = 0; i < 50 && IsBusy; i++)
+            await Task.Delay(100);
+        await RefreshAsync();
+    }
+
+    private string ProviderDisplayName(string id) =>
+        CloudProviders.FirstOrDefault(p => p.Id == id)?.DisplayName ?? id;
+
+    // 切源/刷新后重读：下拉回显 + 状态行 + R2/S3 表单预填（secret 为空则不覆盖界面输入）
+    private void RefreshProviderBlock()
+    {
+        _syncingProvider = true;
+        try { SelectedProvider = _cloudService.GetCloudProvider(); }
+        finally { _syncingProvider = false; }
+        PrefillCredentialForms();
+    }
+
+    // 登录态单独刷新：登录/保存凭证后只翻按钮状态，不覆盖操作结果提示
+    private void UpdateSignedInFlag()
+    {
+        try
+        {
+            IsProviderSignedIn = SelectedProvider switch
+            {
+                "gdrive" or "onedrive" => _cloudService.CheckOAuthToken(SelectedProvider).Ok,
+                "r2" => _cloudService.LoadR2Credentials() != null,
+                "s3" => _cloudService.LoadS3Credentials() != null,
+                _ => false,
+            };
+        }
+        catch (Exception ex)
+        {
+            IsProviderSignedIn = false;
+            LogService.Warn("云存档", $"读取登录态失败: {ex.Message}");
+        }
+    }
+
+    // 提供商状态统一走顶部状态行；本地目录不显示，保持界面干净；
+    // 登录态同步到 IsProviderSignedIn，供登录面板切换按钮
+    private void RefreshProviderStatus()
+    {
+        try
+        {
+            UpdateSignedInFlag();
+            switch (SelectedProvider)
+            {
+                case "gdrive" or "onedrive":
+                    var (ok, msg) = _cloudService.CheckOAuthToken(SelectedProvider);
+                    StatusMessage = ok ? $"已登录：{msg}" : $"未登录：{msg}";
+                    break;
+                case "r2":
+                    StatusMessage = IsProviderSignedIn ? "R2 凭证已配置" : "未配置 R2 凭证，请填写后保存";
+                    break;
+                case "s3":
+                    StatusMessage = IsProviderSignedIn ? "S3 凭证已配置" : "未配置 S3 凭证，请填写后保存";
+                    break;
+                default:
+                    StatusMessage = string.Empty;
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            IsProviderSignedIn = false;
+            StatusMessage = $"状态读取失败：{ex.Message}";
+            LogService.Warn("云存档", $"读取提供商状态失败: {ex.Message}");
+        }
+    }
+
+    private void PrefillCredentialForms()
+    {
+        try
+        {
+            var r2 = _cloudService.LoadR2Credentials();
+            if (r2 != null)
+            {
+                R2AccountId = r2.AccountId;
+                R2AccessKeyId = r2.AccessKeyId;
+                R2Bucket = r2.Bucket;
+                if (!string.IsNullOrEmpty(r2.KeyPrefix)) R2KeyPrefix = r2.KeyPrefix;
+                if (!string.IsNullOrEmpty(r2.Endpoint)) R2Endpoint = r2.Endpoint;
+                if (!string.IsNullOrEmpty(r2.SecretAccessKey)) R2SecretKey = r2.SecretAccessKey;
+            }
+            var s3 = _cloudService.LoadS3Credentials();
+            if (s3 != null)
+            {
+                S3AccessKeyId = s3.AccessKeyId;
+                S3Bucket = s3.Bucket;
+                S3Endpoint = s3.Endpoint;
+                S3Region = s3.Region;
+                if (!string.IsNullOrEmpty(s3.KeyPrefix)) S3KeyPrefix = s3.KeyPrefix;
+                if (!string.IsNullOrEmpty(s3.CaCertPath)) S3CaCertPath = s3.CaCertPath;
+                S3SignPayload = s3.SignPayload;
+                S3AllowInsecureHttp = s3.AllowInsecureHttp;
+                S3AllowInsecureTls = s3.AllowInsecureTls;
+                if (!string.IsNullOrEmpty(s3.SecretAccessKey)) S3SecretKey = s3.SecretAccessKey;
+            }
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("云存档", $"预填凭证表单失败: {ex.Message}");
+        }
+    }
+
+    [RelayCommand]
+    private async Task SignInAsync()
+    {
+        if (IsSigningIn) return;
+        if (SelectedProvider is not ("gdrive" or "onedrive")) return;
+        IsSigningIn = true;
+        _authLogGeneration++;
+        AuthLogLines.Clear();
+        _signInCts = new CancellationTokenSource();
+        void Log(string msg) => System.Windows.Application.Current?.Dispatcher.InvokeAsync(() => AuthLogLines.Add($"[{DateTime.Now:HH:mm:ss}] {msg}"));
+        try
+        {
+            using var oauth = new CloudOAuthService();
+            var tokenPath = _cloudService.GetTokenPath(SelectedProvider);
+            var ok = await oauth.AuthorizeAsync(SelectedProvider, tokenPath, Log, _signInCts.Token);
+            StatusMessage = ok ? "登录成功，重启 Steam 后生效" : "登录未完成";
+            if (ok) ScheduleAuthLogAutoClear();
+            UpdateSignedInFlag();
+            LogService.Info("云存档", $"OAuth 登录{(ok ? "成功" : "未完成")}：{SelectedProvider}");
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"登录异常：{ex.Message}";
+            LogService.Warn("云存档", $"OAuth 登录异常: {ex.Message}");
+        }
+        finally
+        {
+            IsSigningIn = false;
+            _signInCts?.Dispose();
+            _signInCts = null;
+        }
+    }
+
+    [RelayCommand]
+    private void ClearAuthLog()
+    {
+        _authLogGeneration++;
+        AuthLogLines.Clear();
+    }
+
+    // 登录成功后日志框 8 秒自动收起；期间重登/手动清空则取消本次自动清理
+    private void ScheduleAuthLogAutoClear()
+    {
+        var gen = _authLogGeneration;
+        _ = Task.Delay(TimeSpan.FromSeconds(8)).ContinueWith(_ =>
+        {
+            if (gen == _authLogGeneration)
+                System.Windows.Application.Current?.Dispatcher.InvokeAsync(() => AuthLogLines.Clear());
+        });
+    }
+
+    [RelayCommand]
+    private void CancelSignIn()
+    {
+        try { _signInCts?.Cancel(); } catch { }
+    }
+
+    // 退出登录：删 token/凭证文件；DLL 共用同一文件，退出后该源同步即失效，需二次确认
+    [RelayCommand]
+    private async Task SignOutAsync(string? provider)
+    {
+        if (IsBusy || IsSigningIn) return;
+        var target = string.IsNullOrEmpty(provider) ? SelectedProvider : provider;
+        var display = ProviderDisplayName(target);
+        var isOAuth = target is "gdrive" or "onedrive";
+        var confirmed = await _dialogService.ShowConfirmAsync(
+            isOAuth ? "退出登录" : "清除凭证",
+            isOAuth
+                ? $"退出{display}登录后，DLL 也无法再同步到该源（需重启 Steam 生效）。本地备份不受影响。\n\n确认退出吗？"
+                : $"清除{display}凭证后，DLL 也无法再同步到该源（需重启 Steam 生效）。本地备份不受影响。\n\n确认清除吗？",
+            isOAuth ? "退出登录" : "清除凭证", "取消");
+        if (!confirmed) return;
+        try
+        {
+            IsBusy = true;
+            await Task.Run(() => _cloudService.SignOut(target));
+            StatusMessage = isOAuth ? "已退出登录" : "凭证已清除";
+            LogService.Info("云存档", StatusMessage);
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = ex.Message;
+            LogService.Warn("云存档", $"退出登录失败: {ex.Message}");
+            return;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+        RefreshProviderStatus();
+        await RefreshAsync();
+    }
+
+    [RelayCommand]
+    private async Task SaveR2Async()
+    {
+        if (IsBusy) return;
+        try
+        {
+            IsBusy = true;
+            var path = await Task.Run(() => _cloudService.SaveR2Credentials(new R2Credentials(
+                R2AccountId.Trim(), R2AccessKeyId.Trim(), R2SecretKey,
+                R2Bucket.Trim(), R2KeyPrefix.Trim(), R2Endpoint.Trim())));
+            StatusMessage = $"R2 凭证已保存，重启 Steam 后生效";
+            LogService.Info("云存档", $"R2 凭证已保存：{path}");
+            SyncProviderSelection("r2");
+            UpdateSignedInFlag();
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = ex.Message;
+            LogService.Warn("云存档", $"保存 R2 凭证失败: {ex.Message}");
+        }
+        finally { IsBusy = false; }
+    }
+
+    [RelayCommand]
+    private async Task SaveS3Async()
+    {
+        if (IsBusy) return;
+        try
+        {
+            IsBusy = true;
+            var path = await Task.Run(() => _cloudService.SaveS3Credentials(new S3Credentials(
+                S3AccessKeyId.Trim(), S3SecretKey, S3Bucket.Trim(),
+                S3Endpoint.Trim(), S3Region.Trim(), S3KeyPrefix.Trim(),
+                S3SignPayload, S3AllowInsecureHttp, S3AllowInsecureTls, S3CaCertPath.Trim())));
+            StatusMessage = $"S3 凭证已保存，重启 Steam 后生效";
+            LogService.Info("云存档", $"S3 凭证已保存：{path}");
+            SyncProviderSelection("s3");
+            UpdateSignedInFlag();
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = ex.Message;
+            LogService.Warn("云存档", $"保存 S3 凭证失败: {ex.Message}");
+        }
+        finally { IsBusy = false; }
+    }
+
+    [RelayCommand]
+    private void BrowseCaCert()
+    {
+        try
+        {
+            var dialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "选择 CA 证书",
+                Filter = "PEM 文件|*.pem|证书文件|*.crt;*.cer|所有文件|*.*",
+                CheckFileExists = true,
+            };
+            if (!string.IsNullOrEmpty(S3CaCertPath) && System.IO.File.Exists(S3CaCertPath))
+                dialog.InitialDirectory = System.IO.Path.GetDirectoryName(S3CaCertPath);
+            if (dialog.ShowDialog() == true)
+                S3CaCertPath = dialog.FileName;
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = "打开文件选择失败，请重试";
+            LogService.Warn("云存档", $"选择 CA 证书失败: {ex.Message}");
+        }
+    }
+
+    // 保存凭证后把下拉静默同步到对应源（服务侧已落盘，这里只做界面回显，不重触发变更提示）
+    private void SyncProviderSelection(string id)
+    {
+        if (SelectedProvider == id) return;
+        _syncingProvider = true;
+        try { SelectedProvider = id; }
+        finally { _syncingProvider = false; }
     }
 
     // 目录切换统一走这里：同目录直接跳过，否则先搬旧存档再切配置

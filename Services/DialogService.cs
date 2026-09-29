@@ -50,7 +50,7 @@ public sealed class DialogService : IDialogService
 
     // 删除存档确认：结构化面板 + 红色删除按钮；
     // 红色样式必须 BasedOn 默认 Button 样式，只覆颜色，否则圆角模板丢失变成方块
-    public Task<bool> ShowDeleteSavesConfirmAsync(string displayName, int appId, IReadOnlyList<DeleteTarget> targets, string backupDir) =>
+    public Task<bool> ShowDeleteSavesConfirmAsync(string displayName, int appId, IReadOnlyList<DeleteTarget> targets, string backupDir, string? note = null) =>
         ShowDialogOnUiAsync(() =>
         {
                     var dangerStyle = new Style(typeof(Button),
@@ -94,7 +94,7 @@ public sealed class DialogService : IDialogService
                     }
                     panel.Children.Add(new TextBlock
                     {
-                        Text = "注：本地目录模式下同步目录即云副本，没有额外远端。",
+                        Text = note ?? "注：本地目录模式下同步目录即云副本，没有额外远端。",
                         TextWrapping = TextWrapping.Wrap,
                         FontSize = 12,
                         Foreground = secondary,
@@ -119,7 +119,9 @@ public sealed class DialogService : IDialogService
                     });
                     panel.Children.Add(new TextBlock
                     {
-                        Text = "删除前自动备份，恢复需手动拷回对应目录。删除期间请保持 Steam 关闭。",
+                        Text = targets.Any(t => t.Kind == "cloud")
+                            ? "删除前自动备份（云端文件已下载到本地），恢复需手动上传回云端对应目录。删除期间请保持 Steam 关闭。"
+                            : "删除前自动备份，恢复需手动拷回对应目录。删除期间请保持 Steam 关闭。",
                         TextWrapping = TextWrapping.Wrap
                     });
                     panel.Children.Add(new TextBlock
@@ -151,6 +153,7 @@ public sealed class DialogService : IDialogService
         "sync" => "重定向存档",
         "cache" => "DLL 本地缓存",
         "userdata" => "Steam 用户数据",
+        "cloud" => "云端存档",
         _ => kind
     };
 

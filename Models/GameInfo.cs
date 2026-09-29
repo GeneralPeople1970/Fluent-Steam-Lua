@@ -25,10 +25,10 @@ public partial class GameInfo : ObservableObject
     [ObservableProperty]
     private DateTime _luaFileTime;
 
-    // 云存档行副标题：无存档时间时只显示 AppID
+    // 云存档行副标题：无存档时间显示未知，不留空
     public string SaveSubtitle => LastSaveTime.HasValue
         ? $"AppID: {AppId} • 上次存档: {LastSaveTime:yyyy-MM-dd HH:mm}"
-        : $"AppID: {AppId}";
+        : $"AppID: {AppId} • 上次存档: 未知";
 
     [ObservableProperty]
     private bool _isLoading;
