@@ -241,11 +241,31 @@ public partial class App : Application
                 args.ExceptionObject as Exception ?? new Exception(args.ExceptionObject?.ToString() ?? "未知异常"));
         TaskScheduler.UnobservedTaskException += (_, args) =>
         {
-            LogService.Exception("后台任务异常", args.Exception);
+            // SteamKit 内部服务器发现任务在无梯子时被 RST 是预期网络噪声，降为一行 Warn，
+            // 其他未观察异常保持原样上报
+            if (IsSteamNetworkNoise(args.Exception))
+                LogService.Warn("网络", "Steam 服务器列表不可达（无梯子时常见），已忽略");
+            else
+                LogService.Exception("后台任务异常", args.Exception);
             args.SetObserved();
         };
         EventManager.RegisterClassHandler(typeof(ButtonBase), ButtonBase.ClickEvent,
             new RoutedEventHandler(OnGlobalButtonClick));
+    }
+
+    private static bool IsSteamNetworkNoise(Exception ex)
+    {
+        // 调用栈含 SteamKit2 且异常链里有网络异常才算；其他一律按真实 bug 上报
+        if (!ex.ToString().Contains("SteamKit2", StringComparison.Ordinal))
+            return false;
+        for (var e = ex; e != null; e = e.InnerException)
+        {
+            if (e is System.Net.Sockets.SocketException ||
+                e is System.Net.Http.HttpRequestException ||
+                e is System.IO.IOException)
+                return true;
+        }
+        return false;
     }
 
     private static void OnGlobalButtonClick(object sender, RoutedEventArgs e)

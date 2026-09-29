@@ -21,6 +21,9 @@ public sealed class SteamAppInfoService : ISteamAppInfoService, IDisposable
     private readonly SemaphoreSlim _logonLock = new(1, 1);
     private bool _handlersAttached;
     private TaskCompletionSource? _logonTcs;
+    // 登录单飞：并发查询共享同一次登录尝试，各烧各的 20 秒超时是排队卡死的根因
+    private Task<bool>? _logonTask;
+    private readonly object _logonTaskLock = new();
     private const double CallbackTimeoutSeconds = 20;
 
     public SteamAppInfoService()
@@ -47,14 +50,35 @@ public sealed class SteamAppInfoService : ISteamAppInfoService, IDisposable
         _logonLock.Dispose();
     }
 
-    /// <summary>确保已连接并匿名登录。已登录直接复用；断开后自动重连，不锁死。</summary>
+    /// <summary>确保已连接并匿名登录。已登录直接复用；并发查询共享同一次尝试，不各烧各的超时。</summary>
     private async Task<bool> EnsureLoggedOnAsync(CancellationToken ct = default)
     {
         if (_loggedOn) return true;
 
+        Task<bool> attempt;
+        lock (_logonTaskLock)
+        {
+            if (_logonTask == null || _logonTask.IsCompleted)
+                _logonTask = DoLogonAsync();
+            attempt = _logonTask;
+        }
         try
         {
-            await _logonLock.WaitAsync(ct).ConfigureAwait(false);
+            return await attempt.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // 调用方取消不影响本次尝试，其他等待者继续用
+            return false;
+        }
+    }
+
+    // 单次登录尝试自带 20 秒预算；调用方取消只断自己的等待
+    private async Task<bool> DoLogonAsync()
+    {
+        try
+        {
+            await _logonLock.WaitAsync().ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -63,7 +87,7 @@ public sealed class SteamAppInfoService : ISteamAppInfoService, IDisposable
         try
         {
             if (_loggedOn) return true;
-            if (_disposed) throw new ObjectDisposedException(nameof(SteamAppInfoService));
+            if (_disposed) return false;
 
             EnsureLoopStarted();
 
@@ -83,14 +107,13 @@ public sealed class SteamAppInfoService : ISteamAppInfoService, IDisposable
             }
 
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(CallbackTimeoutSeconds));
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
             try
             {
-                await tcs.Task.WaitAsync(linked.Token).ConfigureAwait(false);
+                await tcs.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
-                LogService.Warn("AppInfo", "等待 Steam 登录超时或已取消");
+                LogService.Warn("AppInfo", "等待 Steam 登录超时");
                 return false;
             }
             return _loggedOn;
