@@ -42,12 +42,18 @@ public class UpdateService : IUpdateService
                 : string.Empty);
         var (looseAssetUrl, singleAssetUrl) = ExtractAssetUrls(doc.RootElement);
 
-        var latestVersion = ParseReleaseVersion(tagName)
+        var (latestNumeric, latestSuffix) = ParseReleaseVersion(tagName)
             ?? throw new InvalidOperationException($"无法识别最新版本号：{tagName}");
         var assemblyVersion = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 0, 0);
-        var currentVersion = new Version(assemblyVersion.Major, assemblyVersion.Minor, assemblyVersion.Build);
+        // Revision 纳入比较：否则装着 1.4.8.1 会永远提示更新；-1 兜底（理论上到不了，实测为 0）
+        var currentNumeric = new Version(assemblyVersion.Major, assemblyVersion.Minor, assemblyVersion.Build,
+            assemblyVersion.Revision < 0 ? 0 : assemblyVersion.Revision);
+        // 当前后缀取 InformationalVersion（如 1.4.8-fix+hash 取 fix），纯数字版为空
+        var currentSuffix = ReleaseSuffix(
+            Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "");
 
-        return new UpdateCheckResult(latestVersion > currentVersion, currentVersion, latestVersion, tagName, releaseUrl, releaseNotes, looseAssetUrl, singleAssetUrl);
+        var hasUpdate = CompareRelease((latestNumeric, latestSuffix), (currentNumeric, currentSuffix)) > 0;
+        return new UpdateCheckResult(hasUpdate, currentNumeric, latestNumeric, tagName, releaseUrl, releaseNotes, looseAssetUrl, singleAssetUrl);
     }
 
     // 按包名匹配散文件与单文件包的下载地址：新规范后缀优先命中，
@@ -181,9 +187,40 @@ public class UpdateService : IUpdateService
 
 
 
-    private static Version? ParseReleaseVersion(string tagName)
+    // 支持 x.y.z[.w][-后缀]；数字部分参与比较，后缀只定性不定量
+    private static (Version Numeric, string Suffix)? ParseReleaseVersion(string tagName)
     {
-        var versionText = tagName.Trim().TrimStart('v', 'V');
-        return Version.TryParse(versionText, out var version) ? version : null;
+        var text = tagName.Trim().TrimStart('v', 'V');
+        string suffix = "";
+        var dash = text.IndexOf('-');
+        var numeric = text;
+        if (dash >= 0)
+        {
+            numeric = text[..dash];
+            suffix = ReleaseSuffix(text);
+        }
+        if (!Version.TryParse(numeric, out var version)) return null;
+        return (version, suffix);
+    }
+
+    // 取第一个 '-' 后的发布后缀，'+' 及之后（commit 哈希等构建元数据）丢弃
+    private static string ReleaseSuffix(string versionText)
+    {
+        var dash = versionText.IndexOf('-');
+        if (dash < 0) return "";
+        var suffix = versionText[(dash + 1)..];
+        var plus = suffix.IndexOf('+');
+        return plus >= 0 ? suffix[..plus] : suffix;
+    }
+
+    // 数字优先；数字相同则无后缀 < 有后缀（fix 包视为更新），都有后缀按字典序
+    private static int CompareRelease((Version Numeric, string Suffix) a, (Version Numeric, string Suffix) b)
+    {
+        var c = a.Numeric.CompareTo(b.Numeric);
+        if (c != 0) return c;
+        if (a.Suffix == b.Suffix) return 0;
+        if (a.Suffix.Length == 0) return -1;
+        if (b.Suffix.Length == 0) return 1;
+        return string.Compare(a.Suffix, b.Suffix, StringComparison.Ordinal);
     }
 }
