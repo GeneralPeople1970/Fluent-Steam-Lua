@@ -891,7 +891,7 @@ namespace SteamLuaManager.ViewModels;
 
 			// HasDepot 修正：主游戏 depot 含该 ID 只是旧布局的充分条件（如 949230 主列表根本无 DLC depot 项）；
 			// 以 DLC 自身 depot 查询为准，单项失败回退旧启发式
-			Dictionary<int, bool?> depotMap = new();
+			Dictionary<int, DlcDepotStatus?> depotMap = new();
 			try
 			{
 				DlcQueryOverlayText = "正在分析 DLC 仓库信息...";
@@ -916,9 +916,8 @@ namespace SteamLuaManager.ViewModels;
 						$@"\badd(?:app|token)id\(\s*{dlcId}\s*[,\)]");
 
 				var mainMatch = result.GameDepots.Any(d => d.DepotId == dlcId);
-				var hasOwnDepot = (depotMap.TryGetValue(dlcId, out var queried) && queried.HasValue)
-					? queried.Value
-					: mainMatch;
+				var depotStatus = depotMap.TryGetValue(dlcId, out var queried) ? queried : null;
+				var hasOwnDepot = depotStatus != null ? depotStatus.HasDepots : mainMatch;
 
 				dlcList.Add(new DlcInfo
 				{
@@ -946,21 +945,22 @@ namespace SteamLuaManager.ViewModels;
 				{
 					try
 					{
-						var client = _httpClientProvider.GetClient("dlc-name", TimeSpan.FromSeconds(10));
-						var json = await client.GetStringAsync($"https://store.steampowered.com/api/appdetails?appids={dlc.AppId}&l=schinese", innerCt);
-						var doc = System.Text.Json.JsonDocument.Parse(json);
-						if (doc.RootElement.TryGetProperty(dlc.AppId.ToString(), out var appData) &&
-							appData.TryGetProperty("success", out var success) && success.GetBoolean() &&
-							appData.TryGetProperty("data", out var data) &&
-							data.TryGetProperty("name", out var name))
+						// DLC 名优先级：小黑盒 > steamcmd（批量查询现成名，零成本）> 直接显示 AppID，不再打 Store
+						string? displayName = null;
+						try
 						{
-							dlc.Name = name.GetString() ?? $"DLC {dlc.AppId}";
+							var (heiName, _, _) = await XiaoHeiHeService.GetGameDetailAsync(dlc.AppId, innerCt);
+							if (!string.IsNullOrWhiteSpace(heiName))
+								displayName = heiName;
 						}
-						else
-						{
-							dlc.Name = $"DLC {dlc.AppId}";
-						}
+						catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+						catch { }
+						if (string.IsNullOrWhiteSpace(displayName) &&
+							depotMap.TryGetValue(dlc.AppId, out var st) && !string.IsNullOrWhiteSpace(st?.AppName))
+							displayName = st!.AppName;
+						dlc.Name = string.IsNullOrWhiteSpace(displayName) ? $"DLC {dlc.AppId}" : displayName;
 					}
+					catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
 					catch
 					{
 						dlc.Name = $"DLC {dlc.AppId}";
