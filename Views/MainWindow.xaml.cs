@@ -298,6 +298,7 @@ public partial class MainWindow : Window
         {
             SteamToolType.OpenSteamTool => "使用 OpenSteamTool 内核",
             SteamToolType.SteamTools => "检测到不适配的 SteamTools",
+            SteamToolType.GreenLuma => "检测到不适配的 GreenLuma",
             _ => "未安装 OpenSteamTool"
         };
         Title = $"Fluent Steam Lua 管理工具 - {status}";
@@ -327,12 +328,42 @@ public partial class MainWindow : Window
                 break;
 
             case "检测到不适配的 SteamTools":
-                await ShowModernDialogAsync(
-                    "不适配的 SteamTools",
-                    "检测到 SteamTools（闭源），该内核与本软件不适配。\n\n" +
+            case "检测到不适配的 GreenLuma":
+                var foreignName = _viewModel.OpenSteamToolStatus.Contains("GreenLuma") ? "GreenLuma" : "SteamTools";
+                var goPurify = await ShowModernConfirmAsync(
+                    $"不适配的{foreignName}",
+                    $"检测到{foreignName}，该内核与本软件不适配，多内核混装会导致不生效。\n\n" +
                     "本软件目前仅适配 OpenSteamTool（开源内核）。\n" +
-                    "请卸载 SteamTools 后安装 OpenSteamTool 再使用。");
+                    "是否现在一键净化第三方内核，完成后可直接安装 OpenSteamTool？",
+                    "净化");
+                if (goPurify)
+                    await PurifyKernelAsync();
                 break;
+        }
+
+        // OST 已安装时检测逻辑优先返回，开机即便混装了第三方也不会报；
+        // 这里单独扫一次，有残留就提示净化（不处理则每次启动都提示，直至清干净）
+        if (_openSteamToolService.IsInstalled)
+        {
+            try
+            {
+                var foreign = await _openSteamToolService.ScanForeignKernelsAsync();
+                if (foreign.Count > 0)
+                {
+                    var goPurifyMixed = await ShowModernConfirmAsync(
+                        "检测到内核冲突",
+                        "OpenSteamTool 已安装，但 Steam 目录下还残留第三方内核文件，混装会导致不生效：\n" +
+                        string.Join("\n", foreign.Select(f => $"• {f.RelativePath}（{f.Owner}）")) +
+                        "\n\n是否现在一键净化？",
+                        "净化");
+                    if (goPurifyMixed)
+                        await PurifyKernelAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                LogService.Warn("内核", $"冲突扫描失败: {ex.Message}");
+            }
         }
 
         HomeItem.IsSelected = true;
@@ -1079,10 +1110,13 @@ public partial class MainWindow : Window
             new KernelMenuItem("uninstall", "卸载", hasDisabled ? "存在被临时禁用的内核" : (isInstalled ? "移除 OpenSteamTool" : "未安装"), "\uE74D",
                 isInstalled && !hasDisabled ? criticalBrush : disabledBrush,
                 isInstalled && !hasDisabled ? secondaryBrush : disabledBrush,
-                isInstalled && !hasDisabled)
+                isInstalled && !hasDisabled),
+            KernelMenuItem.Separator(),
+            new KernelMenuItem("purify", "净化环境", "识别并删除第三方内核", "\uE71C",
+                primaryBrush, secondaryBrush)
         };
 
-        PositionSubmenuRelative(KernelSubmenu, trigger, KernelList, 180, 200);
+        PositionSubmenuRelative(KernelSubmenu, trigger, KernelList, 180, 270);
         KernelSubmenu.Visibility = Visibility.Visible;
         ((Storyboard)KernelSubmenu.Resources["OpenSubmenu"]).Begin(KernelSubmenu);
     }
@@ -1107,6 +1141,9 @@ public partial class MainWindow : Window
                 break;
             case "uninstall":
                 await UninstallKernelAsync();
+                break;
+            case "purify":
+                await PurifyKernelAsync();
                 break;
         }
     }
@@ -1307,6 +1344,76 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             await ShowModernDialogAsync("错误", $"卸载失败：{ex.Message}");
+        }
+    }
+
+    private async Task PurifyKernelAsync()
+    {
+        // 删文件前 Steam 必须完全退出，否则占用的 DLL 删不动（更新器同款教训）
+        if (SteamProcess.IsSteamRunning())
+        {
+            await ShowModernDialogAsync("Steam 正在运行", "检测到 Steam 正在运行，净化前请先完全退出 Steam（含托盘）。");
+            return;
+        }
+
+        List<ForeignKernelFile> found;
+        try
+        {
+            found = (await _openSteamToolService.ScanForeignKernelsAsync()).ToList();
+        }
+        catch (Exception ex)
+        {
+            await ShowModernDialogAsync("错误", $"扫描失败：{ex.Message}");
+            return;
+        }
+
+        if (found.Count == 0)
+        {
+            await ShowModernDialogAsync("环境干净", "未发现第三方内核残留，Steam 目录已是纯净环境。");
+            return;
+        }
+
+        var confirmed = await ShowModernConfirmAsync(
+            "确认净化",
+            "将永久删除以下第三方内核文件（无备份，请确认）：\n" +
+            string.Join("\n", found.Select(f => $"• {f.RelativePath}（{f.Owner}）")),
+            "删除");
+        if (!confirmed) return;
+
+        try
+        {
+            var (removed, failed) = await _openSteamToolService.PurifyForeignKernelsAsync(found.Select(f => f.RelativePath));
+            RefreshTitle();
+            if (failed.Count == 0)
+            {
+                // OST 已在位就只报完成；只有没装时才顺势问装不装，
+                // 否则点安装会撞进“已安装是否重新安装”的二次确认
+                if (_openSteamToolService.IsInstalled)
+                {
+                    await ShowModernDialogAsync("净化完成",
+                        $"已移除 {removed} 个第三方内核文件，环境已纯净，OpenSteamTool 可正常工作。\n请重启 Steam 后生效。");
+                }
+                else
+                {
+                    var goInstall = await ShowModernConfirmAsync(
+                        "净化完成",
+                        $"已移除 {removed} 个第三方内核文件，环境已纯净。\n是否现在安装 OpenSteamTool？",
+                        "安装");
+                    if (goInstall)
+                        await InstallKernelAsync();
+                }
+            }
+            else
+            {
+                await ShowModernDialogAsync("部分失败",
+                    $"已移除 {removed} 个，{failed.Count} 个删除失败：\n" +
+                    string.Join("\n", failed.Select(f => $"• {f}")) +
+                    "\n\n请确认 Steam 已完全退出后重试。");
+            }
+        }
+        catch (Exception ex)
+        {
+            await ShowModernDialogAsync("错误", $"净化失败：{ex.Message}");
         }
     }
 

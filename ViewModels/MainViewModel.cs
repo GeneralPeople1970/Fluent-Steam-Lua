@@ -231,6 +231,7 @@ namespace SteamLuaManager.ViewModels;
 		{
 			SteamToolType.OpenSteamTool => "使用 OpenSteamTool 内核",
 			SteamToolType.SteamTools => "检测到不适配的 SteamTools",
+			SteamToolType.GreenLuma => "检测到不适配的 GreenLuma",
 			_ => "未安装 OpenSteamTool"
 		};
 		await RefreshGamesAsync();

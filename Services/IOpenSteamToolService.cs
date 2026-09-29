@@ -19,7 +19,12 @@ public interface IOpenSteamToolService
     Task UninstallAsync();
     Task<int> DisableKernelAsync();
     Task<int> EnableKernelAsync();
+    Task<IReadOnlyList<ForeignKernelFile>> ScanForeignKernelsAsync();
+    Task<(int removed, List<string> failed)> PurifyForeignKernelsAsync(IEnumerable<string> relativePaths);
 }
+
+// 扫描到的第三方内核文件：相对路径 + 所属内核标注（确认框逐字展示用）
+public sealed record ForeignKernelFile(string RelativePath, string Owner);
 
 public class OpenSteamToolService : IOpenSteamToolService
 {
@@ -366,6 +371,99 @@ public class OpenSteamToolService : IOpenSteamToolService
             LogService.Warn("内核", $"以下文件原名已存在，保留禁用副本未覆盖：{string.Join(", ", skipped)}");
         LogService.Info("内核", $"已启用 {done} 个内核文件");
         return Task.FromResult(done);
+    }
+
+    // 第三方内核指纹（相对 Steam 根目录）：只收文件，不收目录；
+    // stplug-in 只是 ST 存 lua 的目录、不影响注入，不在其中
+    private static readonly (string File, string Owner)[] ForeignKernelFingerprints =
+    [
+        ("hid.dll", "SteamTools"),
+        ("steam.cfg", "SteamTools"),
+        ("zlib1.dll", "SteamTools"),
+        ("User32.dll", "GreenLuma"),
+    ];
+
+    // 扫描第三方内核残留：精确名直查 + greenluma*.dll 通配（版号嵌文件名）；
+    // 只看 Steam 根目录顶层，劫持 DLL 必须跟 steam.exe 同级才生效
+    public Task<IReadOnlyList<ForeignKernelFile>> ScanForeignKernelsAsync()
+    {
+        var steamPath = GetSteamPath() ?? throw new InvalidOperationException("无法检测 Steam 路径");
+        var found = new List<ForeignKernelFile>();
+        foreach (var (file, owner) in ForeignKernelFingerprints)
+        {
+            try
+            {
+                if (File.Exists(Path.Combine(steamPath, file)))
+                    found.Add(new ForeignKernelFile(file, owner));
+            }
+            catch (Exception ex)
+            {
+                LogService.Warn("内核", $"扫描 {file} 失败: {ex.Message}");
+            }
+        }
+        try
+        {
+            foreach (var path in Directory.EnumerateFiles(steamPath, "greenluma*.dll"))
+            {
+                var name = Path.GetFileName(path);
+                if (!found.Any(f => f.RelativePath.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                    found.Add(new ForeignKernelFile(name, "GreenLuma"));
+            }
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("内核", $"扫描 GreenLuma 失败: {ex.Message}");
+        }
+        LogService.Info("内核", found.Count == 0
+            ? "未发现第三方内核残留"
+            : $"发现第三方内核残留: {string.Join(", ", found.Select(f => $"{f.RelativePath}({f.Owner})"))}");
+        return Task.FromResult<IReadOnlyList<ForeignKernelFile>>(found);
+    }
+
+    // 净化：逐个删除扫描命中的文件，无备份（调用方确认框已列清）；
+    // 路径越界、有目录嫌疑的一律跳过；只读属性先清再删；失败收集不中断
+    public Task<(int removed, List<string> failed)> PurifyForeignKernelsAsync(IEnumerable<string> relativePaths)
+    {
+        var steamPath = GetSteamPath() ?? throw new InvalidOperationException("无法检测 Steam 路径");
+        var steamFull = Path.GetFullPath(steamPath);
+        var removed = 0;
+        var failed = new List<string>();
+        foreach (var rel in relativePaths)
+        {
+            string full;
+            try
+            {
+                full = Path.GetFullPath(Path.Combine(steamPath, rel));
+            }
+            catch
+            {
+                failed.Add($"{rel}：路径非法，已跳过");
+                continue;
+            }
+            if (!full.StartsWith(steamFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                Directory.Exists(full))
+            {
+                failed.Add($"{rel}：不在 Steam 根目录下或不是文件，已跳过");
+                continue;
+            }
+            if (!File.Exists(full)) continue;
+            try
+            {
+                try { File.SetAttributes(full, FileAttributes.Normal); } catch { }
+                File.Delete(full);
+                removed++;
+                LogService.Info("内核", $"已移除第三方内核文件: {rel}");
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException)
+            {
+                failed.Add($"{rel}：{ex.Message}（文件被占用？请确保 Steam 已关闭）");
+            }
+            catch (Exception ex)
+            {
+                failed.Add($"{rel}：{ex.Message}");
+            }
+        }
+        return Task.FromResult((removed, failed));
     }
 
     // ========== 辅助方法 ==========

@@ -768,11 +768,22 @@ public class SteamPathService : ISteamPathService
         if (File.Exists(Path.Combine(steamPath, "OpenSteamTool.dll")))
             return SteamToolType.OpenSteamTool;
 
-        // SteamTools (闭源) — 独有标识
+        // SteamTools (闭源) — 独有标识；stplug-in 只是它存 lua 的目录，
+        // 不影响注入，残留它不算装了内核
         if (File.Exists(Path.Combine(steamPath, "hid.dll")) ||
             File.Exists(Path.Combine(steamPath, "steam.cfg")) ||
-            Directory.Exists(Path.Combine(steamPath, @"config\stplug-in")))
+            File.Exists(Path.Combine(steamPath, "zlib1.dll")))
             return SteamToolType.SteamTools;
+
+        // GreenLuma — 原版 Steam 根目录没有 User32.dll；greenluma*.dll 版号嵌文件名，通配扫
+        if (File.Exists(Path.Combine(steamPath, "User32.dll")))
+            return SteamToolType.GreenLuma;
+        try
+        {
+            if (Directory.EnumerateFiles(steamPath, "greenluma*.dll").Any())
+                return SteamToolType.GreenLuma;
+        }
+        catch { }
 
         return SteamToolType.None;
     }

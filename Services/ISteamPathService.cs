@@ -4,7 +4,8 @@ public enum SteamToolType
 {
     None,
     OpenSteamTool,
-    SteamTools
+    SteamTools,
+    GreenLuma
 }
 
 public interface ISteamPathService
