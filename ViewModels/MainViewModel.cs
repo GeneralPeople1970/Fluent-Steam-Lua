@@ -888,6 +888,23 @@ namespace SteamLuaManager.ViewModels;
 
 			var totalDlcs = result.DlcAppIds.Count;
 			var dlcList = new List<DlcInfo>();
+
+			// HasDepot 修正：主游戏 depot 含该 ID 只是旧布局的充分条件（如 949230 主列表根本无 DLC depot 项）；
+			// 以 DLC 自身 depot 查询为准，单项失败回退旧启发式
+			Dictionary<int, bool?> depotMap = new();
+			try
+			{
+				DlcQueryOverlayText = "正在分析 DLC 仓库信息...";
+				var depotProgress = new Progress<(int Done, int Total)>(p =>
+					DlcQueryOverlayText = $"正在分析 DLC 仓库信息... ({p.Done}/{p.Total})");
+				depotMap = await _steamDepotService.GetDlcHasDepotsAsync(result.DlcAppIds, depotProgress, ct);
+			}
+			catch (OperationCanceledException) { throw; }
+			catch (Exception ex)
+			{
+				LogService.Warn("主页", $"批量查询 DLC 仓库失败，回退旧判定：{ex.Message}");
+			}
+
 			for (int i = 0; i < totalDlcs; i++)
 			{
 				ct.ThrowIfCancellationRequested();
@@ -898,7 +915,10 @@ namespace SteamLuaManager.ViewModels;
 					System.Text.RegularExpressions.Regex.IsMatch(gameLuaContent,
 						$@"\badd(?:app|token)id\(\s*{dlcId}\s*[,\)]");
 
-				var hasOwnDepot = result.GameDepots.Any(d => d.DepotId == dlcId);
+				var mainMatch = result.GameDepots.Any(d => d.DepotId == dlcId);
+				var hasOwnDepot = (depotMap.TryGetValue(dlcId, out var queried) && queried.HasValue)
+					? queried.Value
+					: mainMatch;
 
 				dlcList.Add(new DlcInfo
 				{

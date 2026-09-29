@@ -481,7 +481,9 @@ public class SteamDepotService : ISteamDepotService
                 matchedItems++;
             }
 
-            // DLC 段：复用预取结果按原顺序写行
+            // DLC 段：复用预取结果按原顺序写行；
+            // 有仓库但无密钥的 DLC 跳过裸行（写了也下载不了，报加密错误），记入 skip 列表统一提示
+            var skippedKeyless = new List<(int AppId, string Name)>();
             if (dlcInfos != null)
             {
                 foreach (var info in dlcInfos)
@@ -498,6 +500,10 @@ public class SteamDepotService : ISteamDepotService
                                 : $"addappid({info.AppId}, 1, \"{dlcMainKey}\") -- {dlcName}");
                             matchedItems++;
                         }
+                        else if (info.Result != null && info.Result.GameDepots.Count > 0)
+                        {
+                            skippedKeyless.Add((info.AppId, dlcName));
+                        }
                         else
                         {
                             sb.AppendLine(string.IsNullOrEmpty(dlcName)
@@ -509,6 +515,12 @@ public class SteamDepotService : ISteamDepotService
                             sb.AppendLine($"addtoken({info.AppId}, \"{dlcToken}\")");
                             matchedItems++;
                         }
+                    }
+                    else if (!depotKeys.ContainsKey(info.AppId.ToString()))
+                    {
+                        // 与主 depot 同 ID 的 DLC（dlcInfos 与 DlcAppIds 一一对应，无需再查）：
+                        // 主段无密钥则仓库行缺失，同样记入缺密钥
+                        skippedKeyless.Add((info.AppId, dlcName));
                     }
 
                     if (info.Result != null)
@@ -531,6 +543,9 @@ public class SteamDepotService : ISteamDepotService
                     }
                 }
             }
+
+            if (skippedKeyless.Count > 0)
+                LogService.Warn("入库", $"以下 DLC 有仓库但密钥仓库未收录，已跳过（更新密钥缓存后重新入库）：{string.Join(", ", skippedKeyless.Select(s => string.IsNullOrEmpty(s.Name) ? s.AppId.ToString() : $"{s.AppId} {s.Name}"))}");
 
             if (pinManifest)
                 LogService.Info("入库", pinnedManifests > 0
@@ -589,6 +604,34 @@ public class SteamDepotService : ISteamDepotService
                 }
             }).ConfigureAwait(false);
         return infos;
+    }
+
+    // 批量查各 DLC 是否有独立仓库：6 路并行（与预取同限流），单个失败记 null（未知）
+    public async Task<Dictionary<int, bool?>> GetDlcHasDepotsAsync(
+        IEnumerable<int> dlcIds, IProgress<(int Done, int Total)>? progress = null, CancellationToken ct = default)
+    {
+        var ids = dlcIds.ToList();
+        var map = new Dictionary<int, bool?>();
+        var done = 0;
+        await Parallel.ForEachAsync(ids,
+            new ParallelOptions { MaxDegreeOfParallelism = 6, CancellationToken = ct },
+            async (id, innerCt) =>
+            {
+                bool? has = null;
+                try
+                {
+                    var r = await QueryAppAsync(id, innerCt);
+                    if (r != null) has = r.GameDepots.Count > 0;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    LogService.Warn("入库", $"查询 DLC {id} 仓库失败: {ex.Message}");
+                }
+                lock (map) { map[id] = has; }
+                progress?.Report((Interlocked.Increment(ref done), ids.Count));
+            }).ConfigureAwait(false);
+        return map;
     }
 
     private async Task<(Dictionary<string, string>? DepotKeys, Dictionary<string, string>? AppTokens)> LoadKeyDictionariesAsync(CancellationToken ct)
