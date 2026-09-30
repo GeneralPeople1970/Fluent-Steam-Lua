@@ -249,20 +249,32 @@
                                    Text="{Binding RedirectedGames.Count, StringFormat=已重定向游戏（共 {0} 个）}"
                                    FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"
                                    Foreground="{DynamicResource TextFillColorPrimaryBrush}"/>
-                        <Button Grid.Column="1" Content="刷新" Padding="12,6"
-                                Command="{Binding RefreshCommand}"
-                                IsEnabled="{Binding IsBusy, Converter={StaticResource BoolInvertConverter}}">
-                            <Button.Background>
-                                <SolidColorBrush Color="{DynamicResource ControlFillColorDefault}" Opacity="0.45"/>
-                            </Button.Background>
-                        </Button>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                            <ComboBox ItemsSource="{Binding SortOptions}"
+                                      SelectedItem="{Binding SelectedSortOption}"
+                                      Padding="8,4" MinWidth="110" Margin="0,0,8,0" VerticalAlignment="Center">
+                                <ComboBox.Background>
+                                    <SolidColorBrush Color="{DynamicResource ControlFillColorDefault}" Opacity="0.45"/>
+                                </ComboBox.Background>
+                            </ComboBox>
+                            <Button Content="刷新" Padding="12,6"
+                                    Command="{Binding RefreshCommand}"
+                                    IsEnabled="{Binding IsBusy, Converter={StaticResource BoolInvertConverter}}">
+                                <Button.Background>
+                                    <SolidColorBrush Color="{DynamicResource ControlFillColorDefault}" Opacity="0.45"/>
+                                </Button.Background>
+                            </Button>
+                        </StackPanel>
                     </Grid>
                     <TextBlock Text="{Binding EmptyHint}"
                                 FontSize="12"
                                Foreground="{DynamicResource TextFillColorSecondaryBrush}"
                                Visibility="{Binding RedirectedGames.Count, Converter={StaticResource ZeroToVisibilityConverter}}"/>
-                    <ItemsControl ItemsSource="{Binding RedirectedGames}"
-                                  Visibility="{Binding RedirectedGames.Count, Converter={StaticResource NonZeroToVisibilityConverter}}">
+                    <controls:SmoothScrollViewer MaxHeight="420" Padding="0,0,12,0"
+                                   VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                   PreviewMouseWheel="GamesScrollViewer_PreviewMouseWheel"
+                                   Visibility="{Binding RedirectedGames.Count, Converter={StaticResource NonZeroToVisibilityConverter}}">
+                    <ItemsControl ItemsSource="{Binding RedirectedGames}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
                                 <Border CornerRadius="10" Padding="12" Margin="0,0,0,8"
@@ -315,6 +327,7 @@
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
+                    </controls:SmoothScrollViewer>
                 </StackPanel>
             </Border>
 

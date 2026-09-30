@@ -22,6 +22,12 @@ public partial class CloudSaveViewModel : ObservableObject
 
     public ObservableCollection<GameInfo> RedirectedGames { get; } = new();
 
+    public System.Collections.Generic.List<string> SortOptions { get; } =
+        new() { "按存档时间降序", "按存档时间升序", "按AppID升序", "按AppID降序" };
+
+    [ObservableProperty]
+    private string _selectedSortOption = "按存档时间降序";
+
     [ObservableProperty]
     private bool _isCloudEnabled;
 
@@ -153,8 +159,8 @@ public partial class CloudSaveViewModel : ObservableObject
             RedirectedGames.Clear();
             foreach (var g in list)
                 RedirectedGames.Add(g);
-            // 成功恢复认证状态行；失败分支已提前返回，不会被覆盖
-            StatusMessage = baseStatus;
+            ApplySorting();
+            RefreshProviderStatus();
             _ = RefreshMissingInfoAsync(list);
         }
         catch (OperationCanceledException)
@@ -168,12 +174,36 @@ public partial class CloudSaveViewModel : ObservableObject
         }
     }
 
+    partial void OnSelectedSortOptionChanged(string value) => ApplySorting();
+
+    // 名单排序：默认存档时间倒序（无时间沉底），切换只重排不重拉
+    private void ApplySorting()
+    {
+        if (RedirectedGames.Count == 0) return;
+        var sorted = SelectedSortOption switch
+        {
+            "按存档时间升序" => RedirectedGames
+                .OrderBy(g => g.LastSaveTime ?? DateTime.MaxValue)
+                .ThenBy(g => g.AppId).ToList(),
+            "按AppID升序" => RedirectedGames.OrderBy(g => g.AppId).ToList(),
+            "按AppID降序" => RedirectedGames.OrderByDescending(g => g.AppId).ToList(),
+            _ => RedirectedGames
+                .OrderByDescending(g => g.LastSaveTime ?? DateTime.MinValue)
+                .ThenBy(g => g.AppId).ToList(),
+        };
+        RedirectedGames.Clear();
+        foreach (var g in sorted)
+            RedirectedGames.Add(g);
+    }
+
     // 后台补齐缺失的名称与封面，失败静默（本地已有内容不受影响）
     private async Task RefreshMissingInfoAsync(List<GameInfo> games)
     {
         try
         {
             await _steamApiService.RefreshGameInfoAsync(games);
+            // 后台补到的名字可能改变按名排序，收尾重排一次
+            ApplySorting();
         }
         catch (Exception ex)
         {
