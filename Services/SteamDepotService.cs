@@ -730,6 +730,21 @@ public class SteamDepotService : ISteamDepotService
             var nameComment = SanitizeLuaComment(dlcName);
             var commentSuffix = string.IsNullOrEmpty(nameComment) ? "" : $" -- {nameComment}";
 
+            // 0. 本地密钥仓库有该 DLC 主 ID 的密钥 → 直接写带密钥行（有没有独立 depot 都正确，
+            // 覆盖 HasDepot 瞬时误判丢 key 的缺口；读内存缓存字典，无网络开销）
+            var (localKeys, _) = await LoadKeyDictionariesAsync(ct);
+            if (localKeys != null &&
+                localKeys.TryGetValue(dlcAppId.ToString(), out var cachedKey) &&
+                !string.IsNullOrEmpty(cachedKey))
+            {
+                result.NeedKey = true;
+                await AppendLinesToLuaAsync(luaPath,
+                    new List<string> { $"addappid({dlcAppId}, 1, \"{cachedKey}\"){commentSuffix}" }, ct);
+                result.Success = true;
+                result.Message = $"DLC {dlcAppId} 密钥获取成功，已写入";
+                return result;
+            }
+
             // 1. 无独立 depot → 无需密钥，直接写入
             if (!hasOwnDepot)
             {

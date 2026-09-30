@@ -916,8 +916,10 @@ namespace SteamLuaManager.ViewModels;
 						$@"\badd(?:app|token)id\(\s*{dlcId}\s*[,\)]");
 
 				var mainMatch = result.GameDepots.Any(d => d.DepotId == dlcId);
+				// 任一来源说有仓库即算有：帝国时代布局（depot 在主游戏名下）靠 mainMatch，
+				// 天际线布局（depot 在 DLC 自己名下）靠逐个查询；查询失败（null）回退 mainMatch
 				var depotStatus = depotMap.TryGetValue(dlcId, out var queried) ? queried : null;
-				var hasOwnDepot = depotStatus != null ? depotStatus.HasDepots : mainMatch;
+				var hasOwnDepot = mainMatch || (depotStatus?.HasDepots == true);
 
 				dlcList.Add(new DlcInfo
 				{
