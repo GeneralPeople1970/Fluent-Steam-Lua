@@ -39,13 +39,19 @@ public sealed class CloudProviderStore
         _tokenPath = tokenPath;
     }
 
-    // 远端路径展示：删除确认对话框与日志使用，不对应本地文件系统
-    public static string DescribeRemote(string provider, string accountId, int appId, string? bucket = null) => provider switch
+    // key 前缀归一化：为空即桶根目录（DLL 默认无前缀）；非空去首尾斜杠后补 trailing /
+    public static string NormalizePrefix(string? keyPrefix) =>
+        string.IsNullOrWhiteSpace(keyPrefix) ? "" : keyPrefix.Trim().Trim('/') + "/";
+
+    // 远端路径展示：删除确认对话框与日志使用，不对应本地文件系统；
+    // root 传有效前缀（S3/R2 可能为空即桶根），OAuth 源沿用 CloudRedirect
+    public static string DescribeRemote(string provider, string accountId, int appId,
+        string? bucket = null, string? root = null) => provider switch
     {
         "gdrive" => $"Google Drive:/{RootFolderName}/{accountId}/{appId}",
         "onedrive" => $"OneDrive:/{RootFolderName}/{accountId}/{appId}",
-        "r2" => $"r2://{bucket ?? "(bucket)"}/{RootFolderName}/{accountId}/{appId}",
-        "s3" => $"s3://{bucket ?? "(bucket)"}/{RootFolderName}/{accountId}/{appId}",
+        "r2" => $"r2://{bucket ?? "(bucket)"}/{root ?? RootFolderName + "/"}{accountId}/{appId}",
+        "s3" => $"s3://{bucket ?? "(bucket)"}/{root ?? RootFolderName + "/"}{accountId}/{appId}",
         _ => $"{provider}:/{accountId}/{appId}",
     };
 
@@ -746,12 +752,97 @@ public sealed class CloudProviderStore
         }
         if (string.IsNullOrEmpty(accessKey) || string.IsNullOrEmpty(secretKey))
             throw new InvalidOperationException("对象存储密钥缺失，请检查凭证配置");
-        var root = string.IsNullOrWhiteSpace(keyPrefix) ? $"{RootFolderName}/" : keyPrefix.Trim().Trim('/') + "/";
+        // DLL 默认无 key 前缀（TopObjectKey = prefix + relPath）；之前默认 CloudRedirect/ 是错的，
+        // 会导致桶里有数据也列举为空
+        var root = NormalizePrefix(keyPrefix);
         return new S3Endpoint(scheme, host, bucket, string.IsNullOrEmpty(region) ? "auto" : region,
             accessKey, secretKey, root);
     }
 
     // S3 客户端按 endpoint 缓存；preview（线程池）与刷新（UI 线程）可并发，加锁防字典竞态
+    // S3 客户端 TLS 选项：R2 走默认，S3 读用户配置；收拢一处，避免四处传散
+    private HttpClient ResolveS3Http(string provider, S3Endpoint ep)
+    {
+        var insecure = false;
+        var caPath = "";
+        if (provider == "s3")
+        {
+            var cred = _loadS3();
+            insecure = cred?.AllowInsecureTls == true;
+            caPath = cred?.CaCertPath ?? "";
+        }
+        return GetS3Client(ep, insecure, caPath);
+    }
+
+    // 连接测试：只列举账号/应用两级目录（不下 stats.json），验证鉴权、endpoint、region、前缀；
+    // 前缀下无数据不算错（返回 0，由调用方提示核对前缀或等待同步）
+    public sealed record CloudProbeResult(int AccountCount, int AppCount, string? SamplePath, string? Error);
+
+    public async Task<CloudProbeResult> ProbeAsync(string provider, CancellationToken ct)
+    {
+        try
+        {
+            return provider switch
+            {
+                "gdrive" => await ProbeDriveAsync(ct),
+                "onedrive" => await ProbeOneDriveAsync(ct),
+                "r2" or "s3" => await ProbeS3Async(provider, ct),
+                _ => throw new InvalidOperationException($"未知的云端提供商：{provider}"),
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return new CloudProbeResult(0, 0, null, ex.Message);
+        }
+    }
+
+    private static bool IsAppDir(string name) =>
+        int.TryParse(name, out var id) && id != 0;
+
+    private async Task<CloudProbeResult> ProbeDriveAsync(CancellationToken ct)
+    {
+        var token = await GetGoogleAccessTokenAsync(ct);
+        var rootId = await FindDriveChildFolderAsync("root", RootFolderName, token, ct);
+        if (rootId == null) return new CloudProbeResult(0, 0, null, null);
+        var accounts = (await ListDriveFoldersAsync(rootId, token, ct))
+            .Where(a => uint.TryParse(a.Name, out _)).ToList();
+        if (accounts.Count == 0) return new CloudProbeResult(0, 0, null, null);
+        var apps = (await ListDriveFoldersAsync(accounts[0].Id, token, ct))
+            .Where(a => IsAppDir(a.Name)).ToList();
+        var sample = apps.Count > 0 ? $"{accounts[0].Name}/{apps[0].Name}/…" : null;
+        return new CloudProbeResult(accounts.Count, apps.Count, sample, null);
+    }
+
+    private async Task<CloudProbeResult> ProbeOneDriveAsync(CancellationToken ct)
+    {
+        var token = await GetOneDriveAccessTokenAsync(ct);
+        var rootChildren = await GetGraphChildrenByPathAsync(RootFolderName, token, ct);
+        var accounts = rootChildren
+            .Where(c => c.IsFolder && uint.TryParse(c.Name, out _)).ToList();
+        if (accounts.Count == 0) return new CloudProbeResult(0, 0, null, null);
+        var apps = (await GetGraphChildrenByIdAsync(accounts[0].Id, token, ct))
+            .Where(c => c.IsFolder && IsAppDir(c.Name)).ToList();
+        var sample = apps.Count > 0 ? $"{accounts[0].Name}/{apps[0].Name}/…" : null;
+        return new CloudProbeResult(accounts.Count, apps.Count, sample, null);
+    }
+
+    private async Task<CloudProbeResult> ProbeS3Async(string provider, CancellationToken ct)
+    {
+        var ep = ResolveS3Endpoint(provider);
+        var http = ResolveS3Http(provider, ep);
+        var accounts = (await ListS3PrefixesAsync(http, ep, ep.RootPrefix, ct))
+            .Where(a => uint.TryParse(a, out _)).ToList();
+        if (accounts.Count == 0) return new CloudProbeResult(0, 0, null, null);
+        var apps = (await ListS3PrefixesAsync(http, ep, $"{ep.RootPrefix}{accounts[0]}/", ct))
+            .Where(IsAppDir).ToList();
+        var sample = apps.Count > 0 ? $"{ep.RootPrefix}{accounts[0]}/{apps[0]}/…" : null;
+        return new CloudProbeResult(accounts.Count, apps.Count, sample, null);
+    }
+
     private HttpClient GetS3Client(S3Endpoint ep, bool allowInsecureTls, string caCertPath)
     {
         var key = $"{ep.Scheme}://{ep.Host}|{allowInsecureTls}|{caCertPath}";
@@ -845,8 +936,9 @@ public sealed class CloudProviderStore
         try
         {
             var doc = XDocument.Parse(body);
-            code = doc.Root?.Element("Code")?.Value ?? "";
-            message = doc.Root?.Element("Message")?.Value ?? "";
+            XNamespace ns = "http://s3.amazonaws.com/doc/2006-03-01/";
+            code = NsValue(doc.Root, ns, "Code");
+            message = NsValue(doc.Root, ns, "Message");
         }
         catch { }
         var hint = code switch
@@ -862,6 +954,16 @@ public sealed class CloudProviderStore
     }
 
     private sealed record S3Object(string Key, long Size, DateTime? LastModified);
+
+    // 部分自建 S3 实现返回的 XML 不带 xmlns：命名空间优先，取不到回退无命名空间，避免静默空列表
+    private static IEnumerable<XElement> NsElements(XElement root, XNamespace ns, string name)
+    {
+        var list = root.Elements(ns + name).ToList();
+        return list.Count > 0 ? list : root.Elements(name);
+    }
+
+    private static string NsValue(XElement? parent, XNamespace ns, string name) =>
+        parent?.Element(ns + name)?.Value ?? parent?.Element(name)?.Value ?? "";
 
     // delimiter 分级列举：prefix + "/" 切出一级子目录；IsTruncated 翻页
     private async Task<List<string>> ListS3PrefixesAsync(HttpClient http, S3Endpoint ep, string prefix, CancellationToken ct)
@@ -885,14 +987,14 @@ public sealed class CloudProviderStore
                 throw new InvalidOperationException($"读取对象存储失败：{S3Error(resp.StatusCode, body)}");
             var doc = XDocument.Parse(body);
             var root = doc.Root!;
-            foreach (var cp in root.Elements(ns + "CommonPrefixes"))
+            foreach (var cp in NsElements(root, ns, "CommonPrefixes"))
             {
-                var p = cp.Element(ns + "Prefix")?.Value ?? "";
+                var p = NsValue(cp, ns, "Prefix");
                 var name = p.StartsWith(prefix, StringComparison.Ordinal) ? p[prefix.Length..].TrimEnd('/') : "";
                 if (name.Length > 0) result.Add(name);
             }
-            var truncated = root.Element(ns + "IsTruncated")?.Value == "true";
-            token = truncated ? root.Element(ns + "NextContinuationToken")?.Value : null;
+            var truncated = NsValue(root, ns, "IsTruncated") == "true";
+            token = truncated ? NsValue(root, ns, "NextContinuationToken") : null;
         } while (!string.IsNullOrEmpty(token));
         return result;
     }
@@ -918,18 +1020,18 @@ public sealed class CloudProviderStore
                 throw new InvalidOperationException($"读取对象存储失败：{S3Error(resp.StatusCode, body)}");
             var doc = XDocument.Parse(body);
             var root = doc.Root!;
-            foreach (var c in root.Elements(ns + "Contents"))
+            foreach (var c in NsElements(root, ns, "Contents"))
             {
-                var key = c.Element(ns + "Key")?.Value ?? "";
+                var key = NsValue(c, ns, "Key");
                 if (key.Length == 0) continue;
-                long.TryParse(c.Element(ns + "Size")?.Value, out var size);
+                long.TryParse(NsValue(c, ns, "Size"), out var size);
                 DateTime? modified = null;
-                if (DateTimeOffset.TryParse(c.Element(ns + "LastModified")?.Value, out var dto))
+                if (DateTimeOffset.TryParse(NsValue(c, ns, "LastModified"), out var dto))
                     modified = dto.LocalDateTime;
                 result.Add(new S3Object(key, size, modified));
             }
-            var truncated = root.Element(ns + "IsTruncated")?.Value == "true";
-            token = truncated ? root.Element(ns + "NextContinuationToken")?.Value : null;
+            var truncated = NsValue(root, ns, "IsTruncated") == "true";
+            token = truncated ? NsValue(root, ns, "NextContinuationToken") : null;
         } while (!string.IsNullOrEmpty(token));
         return result;
     }
@@ -937,7 +1039,7 @@ public sealed class CloudProviderStore
     private async Task<List<CloudAppEntry>> ListS3AppsAsync(string provider, IProgress<string>? progress, CancellationToken ct)
     {
         var ep = ResolveS3Endpoint(provider);
-        var http = GetS3Client(ep, provider == "s3" && (_loadS3()?.AllowInsecureTls == true), _loadS3()?.CaCertPath ?? "");
+        var http = ResolveS3Http(provider, ep);
         var accounts = await ListS3PrefixesAsync(http, ep, ep.RootPrefix, ct);
         var result = new List<CloudAppEntry>();
         var done = 0;
@@ -974,20 +1076,20 @@ public sealed class CloudProviderStore
     private async Task<CloudAppStats> GetS3AppStatsAsync(string provider, string accountId, int appId, CancellationToken ct)
     {
         var ep = ResolveS3Endpoint(provider);
-        var http = GetS3Client(ep, provider == "s3" && (_loadS3()?.AllowInsecureTls == true), _loadS3()?.CaCertPath ?? "");
+        var http = ResolveS3Http(provider, ep);
         var appPrefix = $"{ep.RootPrefix}{accountId}/{appId}/";
         var objects = await ListS3ObjectsAsync(http, ep, appPrefix, ct);
         if (objects.Count == 0)
             throw new InvalidOperationException($"云端未找到该游戏目录：{appId}");
         return new CloudAppStats(objects.Count, objects.Sum(o => o.Size),
-            DescribeRemote(provider, accountId, appId, ep.Bucket));
+            DescribeRemote(provider, accountId, appId, ep.Bucket, ep.RootPrefix));
     }
 
     private async Task<int> DownloadS3AppAsync(string provider, string accountId, int appId, string destDir,
         IProgress<string>? progress, CancellationToken ct)
     {
         var ep = ResolveS3Endpoint(provider);
-        var http = GetS3Client(ep, provider == "s3" && (_loadS3()?.AllowInsecureTls == true), _loadS3()?.CaCertPath ?? "");
+        var http = ResolveS3Http(provider, ep);
         var appPrefix = $"{ep.RootPrefix}{accountId}/{appId}/";
         var objects = await ListS3ObjectsAsync(http, ep, appPrefix, ct);
         if (objects.Count == 0)
@@ -1019,7 +1121,7 @@ public sealed class CloudProviderStore
         IProgress<string>? progress, CancellationToken ct)
     {
         var ep = ResolveS3Endpoint(provider);
-        var http = GetS3Client(ep, provider == "s3" && (_loadS3()?.AllowInsecureTls == true), _loadS3()?.CaCertPath ?? "");
+        var http = ResolveS3Http(provider, ep);
         var appPrefix = $"{ep.RootPrefix}{accountId}/{appId}/";
         var objects = await ListS3ObjectsAsync(http, ep, appPrefix, ct);
         if (objects.Count == 0)

@@ -33,6 +33,14 @@
                              Description="开启后 Lua 游戏存档将重定向到所选位置"
                              Style="{StaticResource SettingsCardStyle}">
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button Content="测试连接" Command="{Binding TestConnectionCommand}"
+                                Padding="12,4" Margin="0,0,8,0" VerticalAlignment="Center"
+                                Visibility="{Binding IsCloudProvider, Converter={StaticResource BoolToVisibilityConverter}}"
+                                IsEnabled="{Binding IsBusy, Converter={StaticResource BoolInvertConverter}}">
+                            <Button.Background>
+                                <SolidColorBrush Color="{DynamicResource ControlFillColorDefault}" Opacity="0.45"/>
+                            </Button.Background>
+                        </Button>
                         <ComboBox ItemsSource="{Binding CloudProviders}"
                                   SelectedValue="{Binding SelectedProvider}"
                                   SelectedValuePath="Id" DisplayMemberPath="DisplayName"
@@ -46,6 +54,10 @@
                                      OnContent="开" OffContent="关" VerticalAlignment="Center"/>
                 </StackPanel>
             </ui:SettingsCard>
+            <TextBlock Text="{Binding EffectiveRootText}" FontSize="12" Margin="0,0,0,8"
+                       TextWrapping="Wrap"
+                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                       Visibility="{Binding EffectiveRootText, Converter={StaticResource StringNotEmptyToVisibilityConverter}}"/>
 
             <ui:SettingsCard Header="本地重定向目录" Margin="0,0,0,8"
                                      Description="云存档在本地的落盘位置"

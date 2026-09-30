@@ -8,9 +8,46 @@ namespace SteamLuaManager.Views;
 
 public partial class CloudSaveView : UserControl
 {
+    private CloudSaveViewModel? _wiredVm;
+
     public CloudSaveView()
     {
         InitializeComponent();
+        DataContextChanged += (_, _) => WireSecretSync();
+        WireSecretSync();
+    }
+
+    // Secret 回显：PasswordBox 不支持绑定，VM 预填只到属性，这里把值同步回框体；
+    // 不等则不写，避免与用户输入互顶；同一 VM 只订阅一次
+    private void WireSecretSync()
+    {
+        if (DataContext is not CloudSaveViewModel vm) return;
+        if (!ReferenceEquals(_wiredVm, vm))
+        {
+            if (_wiredVm != null) _wiredVm.PropertyChanged -= OnSecretPropertyChanged;
+            _wiredVm = vm;
+            vm.PropertyChanged += OnSecretPropertyChanged;
+        }
+        SyncSecretBoxes(vm);
+    }
+
+    private void OnSecretPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (sender is CloudSaveViewModel vm) SyncSecretBoxes(vm, e.PropertyName);
+    }
+
+    private void SyncSecretBoxes(CloudSaveViewModel vm, string? onlyProperty = null)
+    {
+        try
+        {
+            if ((onlyProperty == null || onlyProperty == nameof(vm.R2SecretKey)) &&
+                R2SecretBox.Password != (vm.R2SecretKey ?? ""))
+                R2SecretBox.Password = vm.R2SecretKey ?? "";
+            if ((onlyProperty == null || onlyProperty == nameof(vm.S3SecretKey)) &&
+                S3SecretBox.Password != (vm.S3SecretKey ?? ""))
+                S3SecretBox.Password = vm.S3SecretKey ?? "";
+        }
+        catch { }
     }
 
     // 名单内滚动到顶/底后把滚轮让给外层页面，避免鼠标进来就滚不出去

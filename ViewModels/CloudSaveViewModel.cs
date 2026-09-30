@@ -427,6 +427,12 @@ public partial class CloudSaveViewModel : ObservableObject
     private string _selectedProvider = "folder";
 
     [ObservableProperty]
+    private bool _isCloudProvider;
+
+    [ObservableProperty]
+    private string _effectiveRootText = "";
+
+    [ObservableProperty]
     private bool _isProviderSignedIn;
 
     [ObservableProperty]
@@ -462,6 +468,7 @@ public partial class CloudSaveViewModel : ObservableObject
     partial void OnSelectedProviderChanged(string value)
     {
         if (_syncingProvider) return;
+        IsCloudProvider = value != "folder";
         try
         {
             _cloudService.SetCloudProvider(value);
@@ -503,13 +510,29 @@ public partial class CloudSaveViewModel : ObservableObject
     private string ProviderDisplayName(string id) =>
         CloudProviders.FirstOrDefault(p => p.Id == id)?.DisplayName ?? id;
 
-    // 切源/刷新后重读：下拉回显 + 状态行 + R2/S3 表单预填（secret 为空则不覆盖界面输入）
+    // 切源/刷新后重读：下拉回显 + 状态行 + 有效根目录 + R2/S3 表单预填（secret 为空则不覆盖界面输入）
     private void RefreshProviderBlock()
     {
         _syncingProvider = true;
         try { SelectedProvider = _cloudService.GetCloudProvider(); }
         finally { _syncingProvider = false; }
+        IsCloudProvider = SelectedProvider != "folder";
+        RefreshEffectiveRoot();
         PrefillCredentialForms();
+    }
+
+    // 有效远端根目录：两台机器核对前缀是否一致就看这里
+    private void RefreshEffectiveRoot()
+    {
+        try
+        {
+            var root = _cloudService.GetEffectiveRemoteRoot();
+            EffectiveRootText = string.IsNullOrEmpty(root) ? "" : $"远端根目录：{root}";
+        }
+        catch
+        {
+            EffectiveRootText = "";
+        }
     }
 
     // 登录态单独刷新：登录/保存凭证后只翻按钮状态，不覆盖操作结果提示
@@ -546,10 +569,9 @@ public partial class CloudSaveViewModel : ObservableObject
                     StatusMessage = ok ? $"已登录：{msg}" : $"未登录：{msg}";
                     break;
                 case "r2":
-                    StatusMessage = IsProviderSignedIn ? "R2 凭证已配置" : "未配置 R2 凭证，请填写后保存";
-                    break;
                 case "s3":
-                    StatusMessage = IsProviderSignedIn ? "S3 凭证已配置" : "未配置 S3 凭证，请填写后保存";
+                    var (credOk, credMsg) = _cloudService.CheckStoredCredentials(SelectedProvider);
+                    StatusMessage = credMsg;
                     break;
                 default:
                     StatusMessage = string.Empty;
@@ -656,6 +678,58 @@ public partial class CloudSaveViewModel : ObservableObject
         try { _signInCts?.Cancel(); } catch { }
     }
 
+    // 连接测试：只列举两级目录，不断 stats；0 数据不算错（提示核对前缀），鉴权/网络失败才报错
+    [RelayCommand]
+    private async Task TestConnectionAsync()
+    {
+        if (IsBusy || IsSigningIn) return;
+        var provider = _cloudService.GetCloudProvider();
+        if (provider == "folder")
+        {
+            StatusMessage = "本地目录模式无需连接测试";
+            return;
+        }
+        var display = ProviderDisplayName(provider);
+        var root = _cloudService.GetEffectiveRemoteRoot();
+        try
+        {
+            IsBusy = true;
+            StatusMessage = "正在测试远端连接…";
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            var r = await _cloudService.TestCloudConnectionAsync(cts.Token);
+            if (!string.IsNullOrEmpty(r.Error))
+            {
+                StatusMessage = $"连接测试失败：{r.Error}";
+                LogService.Warn("云存档", $"连接测试失败：{provider} {r.Error}");
+                await _dialogService.ShowAlertAsync("连接测试失败",
+                    $"提供商：{display}\n远端根目录：{root}\n\n错误：{r.Error}");
+                return;
+            }
+            var detail = r.AccountCount == 0
+                ? "认证通过，但该前缀下无数据。请核对 key_prefix/目录名，或 DLL 尚未同步过。"
+                : $"账号 {r.AccountCount} 个" +
+                  (r.AppCount > 0 ? $"，首个账号下应用 {r.AppCount} 个（如 {r.SamplePath}）" : "，首个账号下暂无应用");
+            StatusMessage = "连接测试通过";
+            LogService.Info("云存档", $"连接测试通过：{provider} {detail}");
+            await _dialogService.ShowAlertAsync("连接测试通过",
+                $"提供商：{display}\n远端根目录：{root}\n\n{detail}");
+        }
+        catch (OperationCanceledException)
+        {
+            StatusMessage = "连接测试超时，请检查网络后重试";
+            LogService.Warn("云存档", "连接测试超时");
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = ex.Message;
+            LogService.Warn("云存档", $"连接测试异常: {ex.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
     // 退出登录：删 token/凭证文件；DLL 共用同一文件，退出后该源同步即失效，需二次确认
     [RelayCommand]
     private async Task SignOutAsync(string? provider)
@@ -675,6 +749,9 @@ public partial class CloudSaveViewModel : ObservableObject
         {
             IsBusy = true;
             await Task.Run(() => _cloudService.SignOut(target));
+            // 退出后清空界面 secret（文件已删，留着旧值误导人）；其他表单项保持原样
+            if (target == "r2") R2SecretKey = "";
+            if (target == "s3") S3SecretKey = "";
             StatusMessage = isOAuth ? "已退出登录" : "凭证已清除";
             LogService.Info("云存档", StatusMessage);
         }
@@ -689,6 +766,7 @@ public partial class CloudSaveViewModel : ObservableObject
             IsBusy = false;
         }
         RefreshProviderStatus();
+        RefreshEffectiveRoot();
         await RefreshAsync();
     }
 
@@ -705,6 +783,7 @@ public partial class CloudSaveViewModel : ObservableObject
             StatusMessage = $"R2 凭证已保存，重启 Steam 后生效";
             LogService.Info("云存档", $"R2 凭证已保存：{path}");
             SyncProviderSelection("r2");
+            RefreshEffectiveRoot();
             UpdateSignedInFlag();
         }
         catch (Exception ex)
@@ -729,6 +808,7 @@ public partial class CloudSaveViewModel : ObservableObject
             StatusMessage = $"S3 凭证已保存，重启 Steam 后生效";
             LogService.Info("云存档", $"S3 凭证已保存：{path}");
             SyncProviderSelection("s3");
+            RefreshEffectiveRoot();
             UpdateSignedInFlag();
         }
         catch (Exception ex)

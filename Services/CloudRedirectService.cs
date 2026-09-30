@@ -54,6 +54,12 @@ public interface ICloudRedirectService
     void SetCloudProvider(string provider);
     string GetTokenPath(string provider);
     (bool Ok, string Message) CheckOAuthToken(string provider);
+    // R2/S3 凭证状态：区分缺文件、文件存在但解不开（别机复制）、内容不完整
+    (bool Ok, string Message) CheckStoredCredentials(string provider);
+    // 有效远端根目录展示（供两台机器核对前缀用）；无配置返回空
+    string GetEffectiveRemoteRoot();
+    // 连接测试：只列举两级目录；本地源抛错
+    Task<CloudProviderStore.CloudProbeResult> TestCloudConnectionAsync(CancellationToken ct = default);
     // 退出登录：删除 token/凭证文件；DLL 共用同一文件，退出后该源同步即失效
     void SignOut(string provider);
     string SaveR2Credentials(R2Credentials cred);
@@ -531,6 +537,64 @@ public class CloudRedirectService : ICloudRedirectService
             (true, var msg) => (true, msg),
             (false, var msg) => (false, msg),
         };
+    }
+
+    public (bool Ok, string Message) CheckStoredCredentials(string provider)
+    {
+        try
+        {
+            if (provider is "gdrive" or "onedrive")
+                return CheckOAuthToken(provider);
+            var (path, label) = provider switch
+            {
+                "r2" => (Path.Combine(ConfigDir, "r2_credentials.json"), "R2"),
+                "s3" => (Path.Combine(ConfigDir, "s3_credentials.json"), "S3"),
+                _ => ("", ""),
+            };
+            if (string.IsNullOrEmpty(path)) return (false, "");
+            if (!File.Exists(path))
+                return (false, $"未配置 {label} 凭证，请填写后保存");
+            if (string.IsNullOrEmpty(CloudCredentialStore.ReadJson(path)))
+                return (false, "凭证文件存在但无法解密（可能从其他机器复制），请重新填写并保存");
+            var complete = provider == "r2" ? LoadR2Credentials() != null : LoadS3Credentials() != null;
+            if (!complete)
+                return (false, "凭证文件不完整，请重新填写并保存");
+            return (true, $"{label} 凭证已配置");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"状态读取失败：{ex.Message}");
+        }
+    }
+
+    // 有效远端根目录：两台机器核对 key_prefix 是否一致就看这里
+    public string GetEffectiveRemoteRoot()
+    {
+        try
+        {
+            return GetCloudProvider() switch
+            {
+                "gdrive" => "Google Drive:/CloudRedirect/",
+                "onedrive" => "OneDrive:/CloudRedirect/",
+                "r2" => LoadR2Credentials() is { } c
+                    ? $"r2://{c.Bucket}/{CloudProviderStore.NormalizePrefix(c.KeyPrefix)}" : "",
+                "s3" => LoadS3Credentials() is { } c
+                    ? $"{c.Endpoint.Trim().TrimEnd('/')}/{c.Bucket.Trim()}/{CloudProviderStore.NormalizePrefix(c.KeyPrefix)}" : "",
+                _ => "",
+            };
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    public Task<CloudProviderStore.CloudProbeResult> TestCloudConnectionAsync(CancellationToken ct = default)
+    {
+        var provider = GetCloudProvider();
+        if (provider == "folder")
+            throw new InvalidOperationException("本地目录模式无需连接测试");
+        return _store.ProbeAsync(provider, ct);
     }
 
     // 退出登录：OAuth 删 token 文件，R2/S3 删凭证文件；文件不存在视为未登录，直接报错
