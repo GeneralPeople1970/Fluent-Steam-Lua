@@ -707,7 +707,7 @@ public sealed class CloudProviderStore
     // ---- S3 兼容存储（含 R2）：SigV4 自签名，无第三方 SDK ----
 
     private sealed record S3Endpoint(string Scheme, string Host, string Bucket, string Region,
-        string AccessKey, string SecretKey, string RootPrefix);
+        string AccessKey, string SecretKey, string RootPrefix, bool SignPayload = false);
 
     private S3Endpoint ResolveS3Endpoint(string provider)
     {
@@ -727,13 +727,14 @@ public sealed class CloudProviderStore
                 throw new InvalidOperationException("S3 endpoint 未配置");
             return BuildS3Endpoint(cred.Endpoint.Trim().TrimEnd('/'), cred.Bucket.Trim(), cred.Region.Trim(),
                 cred.AccessKeyId, cred.SecretAccessKey, cred.KeyPrefix,
-                cred.AllowInsecureHttp, cred.AllowInsecureTls, cred.CaCertPath);
+                cred.AllowInsecureHttp, cred.AllowInsecureTls, cred.CaCertPath, cred.SignPayload);
         }
     }
 
     private static S3Endpoint BuildS3Endpoint(string endpoint, string bucket, string region,
         string accessKey, string secretKey, string keyPrefix,
-        bool allowHttp = false, bool allowInsecureTls = false, string caCertPath = "")
+        bool allowHttp = false, bool allowInsecureTls = false, string caCertPath = "",
+        bool signPayload = false)
     {
         var scheme = "https";
         var host = endpoint;
@@ -756,7 +757,7 @@ public sealed class CloudProviderStore
         // 会导致桶里有数据也列举为空
         var root = NormalizePrefix(keyPrefix);
         return new S3Endpoint(scheme, host, bucket, string.IsNullOrEmpty(region) ? "auto" : region,
-            accessKey, secretKey, root);
+            accessKey, secretKey, root, signPayload);
     }
 
     // S3 客户端按 endpoint 缓存；preview（线程池）与刷新（UI 线程）可并发，加锁防字典竞态
@@ -901,7 +902,7 @@ public sealed class CloudProviderStore
     }
 
     private async Task<HttpResponseMessage> SendS3Async(HttpClient http, string method, S3Endpoint ep,
-        string key, SortedDictionary<string, string> query, CancellationToken ct)
+        string key, SortedDictionary<string, string> query, CancellationToken ct, string body = "")
     {
         var encodedKey = string.IsNullOrEmpty(key) ? "" : "/" + S3EncodePath(key);
         var canonicalQuery = string.Join("&",
@@ -910,7 +911,9 @@ public sealed class CloudProviderStore
         var uri = new Uri($"{ep.Scheme}://{ep.Host}{path}");
         var amzDate = DateTime.UtcNow.ToString("yyyyMMddTHHmmssZ");
         var dateStamp = amzDate[..8];
-        const string payloadHash = "UNSIGNED-PAYLOAD";
+        // 载荷哈希：勾选“携带签名载荷”时签 body（本类当前只发空 body），否则 UNSIGNED；
+        // 与 DLL 的 sign_payload 语义一致，R2 恒为 unsigned
+        var payloadHash = ep.SignPayload ? Sha256Hex(body) : "UNSIGNED-PAYLOAD";
         var hostHeader = uri.Host + (uri.IsDefaultPort ? "" : $":{uri.Port}");
         var canonicalHeaders = $"host:{hostHeader}\nx-amz-content-sha256:{payloadHash}\nx-amz-date:{amzDate}\n";
         var canonical = $"{method}\n/{ep.Bucket}{encodedKey}\n{canonicalQuery}\n{canonicalHeaders}\nhost;x-amz-content-sha256;x-amz-date\n{payloadHash}";
