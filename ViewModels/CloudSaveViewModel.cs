@@ -18,6 +18,7 @@ public partial class CloudSaveViewModel : ObservableObject
     private readonly ILuaFileManager _luaFileManager;
 
     private bool _syncingCloudEnabled;
+    private bool _listProgressSeen;
     private readonly Dictionary<int, string> _saveDirs = new();
 
     public ObservableCollection<GameInfo> RedirectedGames { get; } = new();
@@ -40,8 +41,13 @@ public partial class CloudSaveViewModel : ObservableObject
     [ObservableProperty]
     private string _statusMessage = "";
 
+    // 列表区状态行：闲置显示默认提示，连接/读取中与失败时替换显示；
+    // 登录态不再走顶部 StatusMessage，改拼到远端根目录行
     [ObservableProperty]
-    private string _emptyHint = "暂无已重定向游戏：启用云存档后进游戏存一次档即会出现在列表";
+    private string _listStatusText = "暂无已重定向游戏：启用云存档后进游戏存一次档即会出现在列表";
+
+    [ObservableProperty]
+    private bool _isListHintVisible = true;
 
     public CloudSaveViewModel(
         ICloudRedirectService cloudService,
@@ -79,10 +85,11 @@ public partial class CloudSaveViewModel : ObservableObject
         }
         catch (OperationCanceledException)
         {
-            // 被新切换中断静默让路；超时才提示
+            // 被新切换中断静默让路；超时才在列表区提示
             if (timeout.IsCancellationRequested)
             {
-                StatusMessage = "刷新超时，请检查网络后重试";
+                IsListHintVisible = true;
+                ListStatusText = "读取超时，请检查网络后重试";
                 LogService.Warn("云存档", "刷新云端名单超时");
             }
         }
@@ -97,25 +104,56 @@ public partial class CloudSaveViewModel : ObservableObject
     {
         try
         {
-            StatusMessage = "正在刷新状态...";
             var st = await _cloudService.RefreshStatusAsync();
             _syncingCloudEnabled = true;
             try { IsCloudEnabled = st.CloudEnabled; }
             finally { _syncingCloudEnabled = false; }
             SyncPathText = string.IsNullOrEmpty(st.SyncPath) ? "未配置" : st.SyncPath;
             RefreshProviderBlock();
-            EmptyHint = SelectedProvider == "folder"
-                ? "暂无已重定向游戏：启用云存档后进游戏存一次档即会出现在列表"
-                : "暂无云端存档：该源下尚未同步过，或登录/凭证未配置";
+            SetIdleListHint();
             RefreshProviderStatus();
-            var baseStatus = StatusMessage;
 
-            // 名单与封面沿用主页逻辑：先用 Lua 名单与本地缓存秒填，缺的再走网络补齐
-            var progress = new Progress<string>(msg => StatusMessage = msg);
+            // 云端源未登录/无凭证时不发起连接，直接显示闲置提示，避免空等超时
+            if (SelectedProvider != "folder" && !IsProviderSignedIn)
+            {
+                _saveDirs.Clear();
+                RedirectedGames.Clear();
+                SetIdleListHint();
+                return;
+            }
+
+            // 名单与封面沿用主页逻辑：先用 Lua 名单与本地缓存秒填，缺的再走网络补齐；
+            // 连接与读取进度直接显示在列表区
+            var progress = new Progress<string>(msg =>
+            {
+                _listProgressSeen = true;
+                ListStatusText = msg;
+                IsListHintVisible = true;
+            });
             List<RedirectedApp> scanned;
             try
             {
-                scanned = await _cloudService.GetRedirectedAppsAsync(progress, ct);
+                if (SelectedProvider == "folder")
+                {
+                    scanned = await _cloudService.GetRedirectedAppsAsync(progress, ct);
+                }
+                else
+                {
+                    // 连接看门狗：25 秒内无任何进度回报视为连接阶段卡死（DNS/代理黑洞），
+                    // 有进度则放行到 90 秒总预算；本地目录扫描快，不走看门狗
+                    _listProgressSeen = false;
+                    ListStatusText = "正在连接云端…";
+                    IsListHintVisible = true;
+                    var listTask = _cloudService.GetRedirectedAppsAsync(progress, ct);
+                    var winner = await Task.WhenAny(listTask, Task.Delay(TimeSpan.FromSeconds(25), ct));
+                    if (winner != listTask && !_listProgressSeen)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        _refreshCts?.Cancel();
+                        throw new TimeoutException("连接云端超时（25 秒无响应），请检查网络或代理后重试");
+                    }
+                    scanned = await listTask;
+                }
             }
             catch (OperationCanceledException)
             {
@@ -123,12 +161,11 @@ public partial class CloudSaveViewModel : ObservableObject
             }
             catch (Exception ex)
             {
-                // 名单失败不清旧源残留会误导，清空后报错；认证状态拼在后面保留
+                // 名单失败清空旧源残留，错误直接显示在列表区
                 _saveDirs.Clear();
                 RedirectedGames.Clear();
-                StatusMessage = string.IsNullOrEmpty(baseStatus)
-                    ? $"刷新名单失败：{ex.Message}"
-                    : $"刷新名单失败：{ex.Message}（{baseStatus}）";
+                IsListHintVisible = true;
+                ListStatusText = ex is TimeoutException ? ex.Message : $"刷新名单失败：{ex.Message}";
                 LogService.Warn("云存档", $"刷新名单失败: {ex.Message}");
                 return;
             }
@@ -160,6 +197,9 @@ public partial class CloudSaveViewModel : ObservableObject
             foreach (var g in list)
                 RedirectedGames.Add(g);
             ApplySorting();
+            // 有名单隐藏提示行；空名单恢复闲置提示
+            IsListHintVisible = RedirectedGames.Count == 0;
+            if (IsListHintVisible) SetIdleListHint();
             RefreshProviderStatus();
             _ = RefreshMissingInfoAsync(list);
         }
@@ -169,9 +209,19 @@ public partial class CloudSaveViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            StatusMessage = $"刷新失败：{ex.Message}";
+            IsListHintVisible = true;
+            ListStatusText = $"刷新失败：{ex.Message}";
             LogService.Warn("云存档", $"刷新状态失败: {ex.Message}");
         }
+    }
+
+    // 列表区闲置提示：未配置时显示，连接/读取中与失败时被替换
+    private void SetIdleListHint()
+    {
+        ListStatusText = SelectedProvider == "folder"
+            ? "暂无已重定向游戏：启用云存档后进游戏存一次档即会出现在列表"
+            : "暂无云端存档：该源下尚未同步过，或登录/凭证未配置";
+        IsListHintVisible = true;
     }
 
     partial void OnSelectedSortOptionChanged(string value) => ApplySorting();
@@ -430,7 +480,10 @@ public partial class CloudSaveViewModel : ObservableObject
     private bool _isCloudProvider;
 
     [ObservableProperty]
-    private string _effectiveRootText = "";
+    private string _providerStatusLine = "";
+
+    private string _remoteRootPart = "";
+    private string _authStatusPart = "";
 
     [ObservableProperty]
     private bool _isProviderSignedIn;
@@ -521,18 +574,29 @@ public partial class CloudSaveViewModel : ObservableObject
         PrefillCredentialForms();
     }
 
-    // 有效远端根目录：两台机器核对前缀是否一致就看这里
+    // 有效远端根目录：两台机器核对前缀是否一致就看这里；登录态追加在前面，
+    // 未登录时根目录为空，只显示登录态
     private void RefreshEffectiveRoot()
     {
         try
         {
             var root = _cloudService.GetEffectiveRemoteRoot();
-            EffectiveRootText = string.IsNullOrEmpty(root) ? "" : $"远端根目录：{root}";
+            _remoteRootPart = string.IsNullOrEmpty(root) ? "" : $"远端根目录：{root}";
         }
         catch
         {
-            EffectiveRootText = "";
+            _remoteRootPart = "";
         }
+        UpdateProviderStatusLine();
+    }
+
+    private void UpdateProviderStatusLine()
+    {
+        ProviderStatusLine = string.IsNullOrEmpty(_remoteRootPart)
+            ? _authStatusPart
+            : string.IsNullOrEmpty(_authStatusPart)
+                ? _remoteRootPart
+                : $"{_authStatusPart}；{_remoteRootPart}";
     }
 
     // 登录态单独刷新：登录/保存凭证后只翻按钮状态，不覆盖操作结果提示
@@ -555,7 +619,7 @@ public partial class CloudSaveViewModel : ObservableObject
         }
     }
 
-    // 提供商状态统一走顶部状态行；本地目录不显示，保持界面干净；
+    // 登录态拼到远端根目录行；本地目录不显示，保持界面干净；
     // 登录态同步到 IsProviderSignedIn，供登录面板切换按钮
     private void RefreshProviderStatus()
     {
@@ -566,24 +630,25 @@ public partial class CloudSaveViewModel : ObservableObject
             {
                 case "gdrive" or "onedrive":
                     var (ok, msg) = _cloudService.CheckOAuthToken(SelectedProvider);
-                    StatusMessage = ok ? $"已登录：{msg}" : $"未登录：{msg}";
+                    _authStatusPart = ok ? $"已登录：{msg}" : $"未登录：{msg}";
                     break;
                 case "r2":
                 case "s3":
-                    var (credOk, credMsg) = _cloudService.CheckStoredCredentials(SelectedProvider);
-                    StatusMessage = credMsg;
+                    var (_, credMsg) = _cloudService.CheckStoredCredentials(SelectedProvider);
+                    _authStatusPart = credMsg;
                     break;
                 default:
-                    StatusMessage = string.Empty;
+                    _authStatusPart = string.Empty;
                     break;
             }
         }
         catch (Exception ex)
         {
             IsProviderSignedIn = false;
-            StatusMessage = $"状态读取失败：{ex.Message}";
+            _authStatusPart = $"状态读取失败：{ex.Message}";
             LogService.Warn("云存档", $"读取提供商状态失败: {ex.Message}");
         }
+        UpdateProviderStatusLine();
     }
 
     private void PrefillCredentialForms()

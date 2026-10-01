@@ -238,7 +238,9 @@ public sealed class CloudProviderStore
 
     private async Task<List<CloudAppEntry>> ListDriveAppsAsync(IProgress<string>? progress, CancellationToken ct)
     {
+        progress?.Report("正在连接 Google Drive…");
         var token = await GetGoogleAccessTokenAsync(ct);
+        progress?.Report("正在读取云端目录…");
         var rootId = await FindDriveChildFolderAsync("root", RootFolderName, token, ct);
         if (rootId == null) return new List<CloudAppEntry>();
         var accounts = await ListDriveFoldersAsync(rootId, token, ct);
@@ -509,7 +511,9 @@ public sealed class CloudProviderStore
 
     private async Task<List<CloudAppEntry>> ListOneDriveAppsAsync(IProgress<string>? progress, CancellationToken ct)
     {
+        progress?.Report("正在连接 OneDrive…");
         var token = await GetOneDriveAccessTokenAsync(ct);
+        progress?.Report("正在读取云端目录…");
         var rootChildren = await GetGraphChildrenByPathAsync(RootFolderName, token, ct);
         var result = new List<CloudAppEntry>();
         var done = 0;
@@ -1041,8 +1045,10 @@ public sealed class CloudProviderStore
 
     private async Task<List<CloudAppEntry>> ListS3AppsAsync(string provider, IProgress<string>? progress, CancellationToken ct)
     {
+        progress?.Report(provider == "r2" ? "正在连接 R2…" : "正在连接 S3…");
         var ep = ResolveS3Endpoint(provider);
         var http = ResolveS3Http(provider, ep);
+        progress?.Report("正在读取云端目录…");
         var accounts = await ListS3PrefixesAsync(http, ep, ep.RootPrefix, ct);
         var result = new List<CloudAppEntry>();
         var done = 0;

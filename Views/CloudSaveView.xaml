@@ -17,10 +17,10 @@
                 <TextBlock Text="将Lua游戏的Steam云存档重定向到本地目录或云端存储（Google Drive / OneDrive / R2 / S3），以修复云存档报错问题"
                            FontSize="12" TextWrapping="Wrap"
                            Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
-                <TextBlock Text="启用前请先备份重要存档以防出错；开关、目录与服务商变更需重启Steam生效"
+                <TextBlock Text="启用前请先备份重要存档以防出错；开关、目录与服务商变更需重启Steam生效；成就与时长跟随云端同步"
                            FontSize="12" TextWrapping="Wrap"
                            Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
-                <TextBlock Text="成就与时长跟随云端同步"
+                <TextBlock Text="注意：该功能需要电脑已安装VC++运行库才能正常工作"
                            FontSize="12" TextWrapping="Wrap"
                            Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                 <TextBlock Text="{Binding StatusMessage}" FontSize="12" Margin="0,8,0,0"
@@ -54,10 +54,10 @@
                                      OnContent="开" OffContent="关" VerticalAlignment="Center"/>
                 </StackPanel>
             </ui:SettingsCard>
-            <TextBlock Text="{Binding EffectiveRootText}" FontSize="12" Margin="0,0,0,8"
+            <TextBlock Text="{Binding ProviderStatusLine}" FontSize="12" Margin="0,0,0,8"
                        TextWrapping="Wrap"
                        Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                       Visibility="{Binding EffectiveRootText, Converter={StaticResource StringNotEmptyToVisibilityConverter}}"/>
+                       Visibility="{Binding ProviderStatusLine, Converter={StaticResource StringNotEmptyToVisibilityConverter}}"/>
 
             <ui:SettingsCard Header="本地重定向目录" Margin="0,0,0,8"
                                      Description="云存档在本地的落盘位置"
@@ -278,10 +278,10 @@
                             </Button>
                         </StackPanel>
                     </Grid>
-                    <TextBlock Text="{Binding EmptyHint}"
-                                FontSize="12"
+                    <TextBlock Text="{Binding ListStatusText}"
+                                FontSize="12" Margin="0,0,0,8"
                                Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                               Visibility="{Binding RedirectedGames.Count, Converter={StaticResource ZeroToVisibilityConverter}}"/>
+                               Visibility="{Binding IsListHintVisible, Converter={StaticResource BoolToVisibilityConverter}}"/>
                     <controls:SmoothScrollViewer MaxHeight="420" Padding="0,0,12,0"
                                    VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                                    PreviewMouseWheel="GamesScrollViewer_PreviewMouseWheel"
