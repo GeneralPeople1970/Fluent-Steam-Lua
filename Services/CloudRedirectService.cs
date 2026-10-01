@@ -165,6 +165,7 @@ public class CloudRedirectService : ICloudRedirectService
 
         status?.Report("正在写入重定向配置...");
         WriteRedirectConfig(syncPath);
+        SyncPinConfigCloudEnabled(steamPath, true);
 
         LogService.Info("云存档", $"云存档已启用（{syncPath}）");
         return Task.CompletedTask;
@@ -178,8 +179,41 @@ public class CloudRedirectService : ICloudRedirectService
         // DLL 与配置文件保留，仅关闭开关，下次启用无需重新部署
         if (!_steamPathService.SetCloudEnabled(false))
             throw new InvalidOperationException("写入 opensteamtool.toml 失败，请检查文件权限");
+        SyncPinConfigCloudEnabled(steamPath, false);
         LogService.Info("云存档", "云存档已关闭");
         return Task.CompletedTask;
+    }
+
+    // DLL 内部总闸（<Steam>\cloud_redirect\config.json 的 cloud_redirect 布尔值）：
+    // 文件不存在绝不创建（缺省即开启）；存在才跟随界面开关同步，其余键原样保留；
+    // 解析失败原样保留；全程不抛异常，不阻断主开关流程
+    private void SyncPinConfigCloudEnabled(string steamPath, bool enabled)
+    {
+        try
+        {
+            var pinPath = Path.Combine(steamPath, "cloud_redirect", "config.json");
+            if (!File.Exists(pinPath)) return;
+            JsonObject root;
+            try
+            {
+                root = JsonNode.Parse(File.ReadAllText(pinPath))?.AsObject() ?? new JsonObject();
+            }
+            catch
+            {
+                LogService.Warn("云存档", "DLL 开关配置解析失败，原样保留未同步");
+                return;
+            }
+            if (root["cloud_redirect"]?.GetValue<bool>() == enabled) return;
+            root["cloud_redirect"] = enabled;
+            var tmp = pinPath + ".new";
+            File.WriteAllText(tmp, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            File.Move(tmp, pinPath, overwrite: true);
+            LogService.Info("云存档", $"DLL 云开关已同步为{(enabled ? "开" : "关")}");
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("云存档", $"同步 DLL 云开关失败（不影响主流程）: {ex.Message}");
+        }
     }
 
     // 目录切换时把旧目录存档搬到新目录：逐文件复制，失败跳过并记录；
