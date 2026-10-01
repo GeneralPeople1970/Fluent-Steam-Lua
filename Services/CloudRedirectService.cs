@@ -58,6 +58,8 @@ public interface ICloudRedirectService
     (bool Ok, string Message) CheckStoredCredentials(string provider);
     // 有效远端根目录展示（供两台机器核对前缀用）；无配置返回空
     string GetEffectiveRemoteRoot();
+    // 最近一次云端名单读取中跳过的失败项（内存记录，不依赖日志开关）
+    IReadOnlyList<string> GetLastListFailures();
     // 连接测试：只列举两级目录；本地源抛错
     Task<CloudProviderStore.CloudProbeResult> TestCloudConnectionAsync(CancellationToken ct = default);
     // 退出登录：删除 token/凭证文件；DLL 共用同一文件，退出后该源同步即失效
@@ -784,6 +786,8 @@ public class CloudRedirectService : ICloudRedirectService
         LogService.Info("云存档", $"云端名单：{provider} 下 {found.Count} 个");
         return found.OrderBy(kv => kv.Key).Select(kv => kv.Value).ToList();
     }
+
+    public IReadOnlyList<string> GetLastListFailures() => _store.GetLastListFailures();
 
     // 云端源下打开路径的目标地址：Drive 进目录页，OneDrive 用条目自带链接，R2 进面板，S3 拼桶浏览地址；
     // 多账号取最近有存档时间的那个，最相关

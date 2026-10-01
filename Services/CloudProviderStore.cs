@@ -64,6 +64,79 @@ public sealed class CloudProviderStore
             _ => throw new InvalidOperationException($"未知的云端提供商：{provider}"),
         };
 
+    // 并发限流（4 并发防云端风控）+ 单项异常隔离 + 计数进度；失败项记入内存名单，
+    // 末尾串行单个重试一次，仍失败则跳过记日志；全程不依赖 app.log（日志开关关闭时流程不受影响）
+    private const int ListDegree = 4;
+
+    private readonly List<string> _listFailures = new();
+
+    public IReadOnlyList<string> GetLastListFailures()
+    {
+        lock (_listFailures) return _listFailures.ToList();
+    }
+
+    private async Task<List<CloudAppEntry>> RunParallelListAsync<T>(
+        IReadOnlyList<T> items,
+        Func<T, string> describe,
+        Func<T, CancellationToken, Task<CloudAppEntry>> fetch,
+        IProgress<string>? progress,
+        CancellationToken ct)
+    {
+        var results = new CloudAppEntry?[items.Count];
+        var failed = new List<(int index, T item, string reason)>();
+        var completed = 0;
+        using var throttle = new SemaphoreSlim(ListDegree);
+        await Task.WhenAll(items.Select(async (item, index) =>
+        {
+            await throttle.WaitAsync(ct);
+            try
+            {
+                try
+                {
+                    results[index] = await fetch(item, ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    lock (failed) failed.Add((index, item, ex.Message));
+                }
+            }
+            finally
+            {
+                throttle.Release();
+                progress?.Report($"正在读取云端名单({Interlocked.Increment(ref completed)} 个)…");
+            }
+        }));
+        ct.ThrowIfCancellationRequested();
+        // 失败项串行单个重试一次；瞬时抖动靠这次重试消化，持续失败则跳过
+        if (failed.Count > 0)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(2), ct);
+            var retryTotal = failed.Count;
+            var retryDone = 0;
+            foreach (var (index, item, reason) in failed.ToList())
+            {
+                ct.ThrowIfCancellationRequested();
+                progress?.Report($"正在重试读取失败的游戏({++retryDone}/{retryTotal})…");
+                try
+                {
+                    results[index] = await fetch(item, ct);
+                    lock (failed) failed.RemoveAll(f => f.index == index);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    LogService.Warn("云存档", $"游戏 {describe(item)} 读取失败，已跳过：{ex.Message}（首次失败：{reason}）");
+                }
+            }
+        }
+        lock (_listFailures)
+        {
+            _listFailures.Clear();
+            foreach (var (_, item, reason) in failed)
+                _listFailures.Add($"{describe(item)}（{reason}）");
+        }
+        return results.Where(e => e != null).Select(e => e!).OrderBy(e => e.AppId).ToList();
+    }
+
     public Task<CloudAppStats> GetAppStatsAsync(string provider, string accountId, int appId, CancellationToken ct) =>
         provider switch
         {
@@ -238,31 +311,33 @@ public sealed class CloudProviderStore
 
     private async Task<List<CloudAppEntry>> ListDriveAppsAsync(IProgress<string>? progress, CancellationToken ct)
     {
+        lock (_listFailures) _listFailures.Clear();
         progress?.Report("正在连接 Google Drive…");
         var token = await GetGoogleAccessTokenAsync(ct);
         progress?.Report("正在读取云端目录…");
         var rootId = await FindDriveChildFolderAsync("root", RootFolderName, token, ct);
         if (rootId == null) return new List<CloudAppEntry>();
         var accounts = await ListDriveFoldersAsync(rootId, token, ct);
-        var result = new List<CloudAppEntry>();
-        var done = 0;
+        var apps = new List<(string Account, int AppId, string FolderId)>();
         foreach (var (accountName, _) in accounts)
         {
             // 账号目录只认数字；找不到下级目录直接跳过，不回退到上级，避免串号
             if (!uint.TryParse(accountName, out _)) continue;
             var accountFolderId = await GetDriveIdAsync(rootId, accountName, token, ct);
             if (accountFolderId == null) continue;
-            var apps = await ListDriveFoldersAsync(accountFolderId, token, ct);
-            foreach (var (appName, appId2) in apps)
+            foreach (var (appName, appFolderId) in await ListDriveFoldersAsync(accountFolderId, token, ct))
             {
                 if (!int.TryParse(appName, out var appId) || appId == 0) continue;
-                done++;
-                progress?.Report($"正在读取云端名单({done} 个)…");
-                var time = await GetDriveAppTimeAsync(appId2, token, ct);
-                result.Add(new CloudAppEntry(accountName, appId, time, appId2, null));
+                apps.Add((accountName, appId, appFolderId));
             }
         }
-        return result.OrderBy(e => e.AppId).ToList();
+        return await RunParallelListAsync(apps,
+            a => $"AppID {a.AppId}",
+            async (a, ct) =>
+            {
+                var time = await GetDriveAppTimeAsync(a.FolderId, token, ct);
+                return new CloudAppEntry(a.Account, a.AppId, time, a.FolderId, null);
+            }, progress, ct);
     }
 
     private async Task<string?> GetDriveIdAsync(string parentId, string name, string token, CancellationToken ct)
@@ -511,26 +586,28 @@ public sealed class CloudProviderStore
 
     private async Task<List<CloudAppEntry>> ListOneDriveAppsAsync(IProgress<string>? progress, CancellationToken ct)
     {
+        lock (_listFailures) _listFailures.Clear();
         progress?.Report("正在连接 OneDrive…");
         var token = await GetOneDriveAccessTokenAsync(ct);
         progress?.Report("正在读取云端目录…");
         var rootChildren = await GetGraphChildrenByPathAsync(RootFolderName, token, ct);
-        var result = new List<CloudAppEntry>();
-        var done = 0;
+        var apps = new List<(string Account, int AppId, string FolderId, DateTime? Modified, string? WebUrl)>();
         foreach (var acct in rootChildren.Where(c => c.IsFolder))
         {
             if (!uint.TryParse(acct.Name, out _)) continue;
-            var apps = await GetGraphChildrenByIdAsync(acct.Id, token, ct);
-            foreach (var app in apps.Where(c => c.IsFolder))
+            foreach (var app in (await GetGraphChildrenByIdAsync(acct.Id, token, ct)).Where(c => c.IsFolder))
             {
                 if (!int.TryParse(app.Name, out var appId) || appId == 0) continue;
-                done++;
-                progress?.Report($"正在读取云端名单({done} 个)…");
-                var time = await GetOneDriveAppTimeAsync(app.Id, token, ct) ?? app.LastModified;
-                result.Add(new CloudAppEntry(acct.Name, appId, time, app.Id, app.WebUrl));
+                apps.Add((acct.Name, appId, app.Id, app.LastModified, app.WebUrl));
             }
         }
-        return result.OrderBy(e => e.AppId).ToList();
+        return await RunParallelListAsync(apps,
+            a => $"AppID {a.AppId}",
+            async (a, ct) =>
+            {
+                var time = await GetOneDriveAppTimeAsync(a.FolderId, token, ct) ?? a.Modified;
+                return new CloudAppEntry(a.Account, a.AppId, time, a.FolderId, a.WebUrl);
+            }, progress, ct);
     }
 
     private sealed record GraphNode(string Id, string Name, bool IsFolder, long Size, DateTime? LastModified, string? WebUrl);
@@ -1045,41 +1122,47 @@ public sealed class CloudProviderStore
 
     private async Task<List<CloudAppEntry>> ListS3AppsAsync(string provider, IProgress<string>? progress, CancellationToken ct)
     {
+        lock (_listFailures) _listFailures.Clear();
         progress?.Report(provider == "r2" ? "正在连接 R2…" : "正在连接 S3…");
         var ep = ResolveS3Endpoint(provider);
         var http = ResolveS3Http(provider, ep);
         progress?.Report("正在读取云端目录…");
-        var accounts = await ListS3PrefixesAsync(http, ep, ep.RootPrefix, ct);
-        var result = new List<CloudAppEntry>();
-        var done = 0;
-        foreach (var accountId in accounts)
+        // 全量递归列举一次，本地按 <账号>/<游戏>/ 分组；原来每游戏一次前缀列举直接省掉，
+        // 共享桶里的无关键按同样规则过滤
+        var objects = await ListS3ObjectsAsync(http, ep, ep.RootPrefix, ct);
+        var groups = new Dictionary<(string Account, int AppId), List<S3Object>>();
+        foreach (var o in objects)
         {
-            if (!uint.TryParse(accountId, out _)) continue;
-            var apps = await ListS3PrefixesAsync(http, ep, $"{ep.RootPrefix}{accountId}/", ct);
-            foreach (var appName in apps)
+            if (!o.Key.StartsWith(ep.RootPrefix, StringComparison.Ordinal)) continue;
+            var rel = o.Key.Substring(ep.RootPrefix.Length);
+            var slash = rel.IndexOf('/');
+            if (slash <= 0) continue;
+            var account = rel.Substring(0, slash);
+            var rest = rel.Substring(slash + 1);
+            var slash2 = rest.IndexOf('/');
+            var appPart = slash2 < 0 ? rest : rest.Substring(0, slash2);
+            if (!uint.TryParse(account, out _) || !int.TryParse(appPart, out var appId) || appId == 0) continue;
+            if (!groups.TryGetValue((account, appId), out var list)) groups[(account, appId)] = list = new List<S3Object>();
+            list.Add(o);
+        }
+        var apps = groups.Keys.ToList();
+        var emptyQuery = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        return await RunParallelListAsync(apps,
+            a => $"AppID {a.AppId}",
+            async (a, ct) =>
             {
-                if (!int.TryParse(appName, out var appId) || appId == 0) continue;
-                done++;
-                progress?.Report($"正在读取云端名单({done} 个)…");
-                var appPrefix = $"{ep.RootPrefix}{accountId}/{appId}/";
                 DateTime? time = null;
-                using (var statsResp = await SendS3Async(http, "GET", ep, appPrefix + StatsFileName,
-                           new SortedDictionary<string, string>(StringComparer.Ordinal), ct))
+                var statsKey = $"{ep.RootPrefix}{a.Account}/{a.AppId}/{StatsFileName}";
+                using (var statsResp = await SendS3Async(http, "GET", ep, statsKey, emptyQuery, ct))
                 {
                     if (statsResp.StatusCode == HttpStatusCode.OK)
                         time = TryParseCloudTime(await statsResp.Content.ReadAsStringAsync(ct));
                 }
-                if (!time.HasValue)
-                {
-                    var objects = await ListS3ObjectsAsync(http, ep, appPrefix, ct);
-                    time = objects.Where(o => o.LastModified.HasValue).Select(o => o.LastModified!.Value)
-                        .DefaultIfEmpty().Max();
-                    if (time == default) time = null;
-                }
-                result.Add(new CloudAppEntry(accountId, appId, time, null, null));
-            }
-        }
-        return result.OrderBy(e => e.AppId).ToList();
+                time ??= groups[a].Where(o => o.LastModified.HasValue).Select(o => o.LastModified!.Value)
+                    .DefaultIfEmpty().Max();
+                if (time == default) time = null;
+                return new CloudAppEntry(a.Account, a.AppId, time, null, null);
+            }, progress, ct);
     }
 
     private async Task<CloudAppStats> GetS3AppStatsAsync(string provider, string accountId, int appId, CancellationToken ct)

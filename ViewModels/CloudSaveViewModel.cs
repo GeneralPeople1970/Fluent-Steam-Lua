@@ -197,9 +197,23 @@ public partial class CloudSaveViewModel : ObservableObject
             foreach (var g in list)
                 RedirectedGames.Add(g);
             ApplySorting();
-            // 有名单隐藏提示行；空名单恢复闲置提示
-            IsListHintVisible = RedirectedGames.Count == 0;
-            if (IsListHintVisible) SetIdleListHint();
+            // 有名单隐藏提示行；空名单恢复闲置提示；有跳过项则常驻显示失败说明
+            var listFails = _cloudService.GetLastListFailures();
+            if (listFails.Count > 0)
+            {
+                var shown = listFails.Count <= 3
+                    ? string.Join("，", listFails)
+                    : string.Join("，", listFails.Take(3)) + $"等{listFails.Count}个";
+                ListStatusText = RedirectedGames.Count == 0
+                    ? $"{listFails.Count} 个游戏读取失败，已跳过：{shown}"
+                    : $"部分游戏读取失败，已跳过：{shown}；其余 {RedirectedGames.Count} 个正常";
+                IsListHintVisible = true;
+                LogService.Warn("云存档", $"云端名单读取跳过 {listFails.Count} 个：{string.Join("；", listFails)}");
+            }
+            else
+            {
+                RestoreIdleListHint();
+            }
             RefreshProviderStatus();
             _ = RefreshMissingInfoAsync(list);
         }
@@ -743,7 +757,15 @@ public partial class CloudSaveViewModel : ObservableObject
         try { _signInCts?.Cancel(); } catch { }
     }
 
+    // 列表区回到闲置：有名单隐藏提示行，空名单恢复闲置提示
+    private void RestoreIdleListHint()
+    {
+        IsListHintVisible = RedirectedGames.Count == 0;
+        if (IsListHintVisible) SetIdleListHint();
+    }
+
     // 连接测试：只列举两级目录，不断 stats；0 数据不算错（提示核对前缀），鉴权/网络失败才报错
+    // 结果由弹窗承载，不写顶部状态行；进行中与失败过程显示在列表状态区
     [RelayCommand]
     private async Task TestConnectionAsync()
     {
@@ -751,7 +773,8 @@ public partial class CloudSaveViewModel : ObservableObject
         var provider = _cloudService.GetCloudProvider();
         if (provider == "folder")
         {
-            StatusMessage = "本地目录模式无需连接测试";
+            ListStatusText = "本地目录模式无需连接测试";
+            IsListHintVisible = true;
             return;
         }
         var display = ProviderDisplayName(provider);
@@ -759,12 +782,14 @@ public partial class CloudSaveViewModel : ObservableObject
         try
         {
             IsBusy = true;
-            StatusMessage = "正在测试远端连接…";
+            ListStatusText = "正在测试远端连接…";
+            IsListHintVisible = true;
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
             var r = await _cloudService.TestCloudConnectionAsync(cts.Token);
             if (!string.IsNullOrEmpty(r.Error))
             {
-                StatusMessage = $"连接测试失败：{r.Error}";
+                ListStatusText = $"连接测试失败：{r.Error}";
+                IsListHintVisible = true;
                 LogService.Warn("云存档", $"连接测试失败：{provider} {r.Error}");
                 await _dialogService.ShowAlertAsync("连接测试失败",
                     $"提供商：{display}\n远端根目录：{root}\n\n错误：{r.Error}");
@@ -772,21 +797,22 @@ public partial class CloudSaveViewModel : ObservableObject
             }
             var detail = r.AccountCount == 0
                 ? "认证通过，但该前缀下无数据。请核对 key_prefix/目录名，或 DLL 尚未同步过。"
-                : $"账号 {r.AccountCount} 个" +
-                  (r.AppCount > 0 ? $"，首个账号下应用 {r.AppCount} 个（如 {r.SamplePath}）" : "，首个账号下暂无应用");
-            StatusMessage = "连接测试通过";
+                : $"账号 {r.AccountCount} 个，首个账号下游戏 {r.AppCount} 个";
             LogService.Info("云存档", $"连接测试通过：{provider} {detail}");
+            RestoreIdleListHint();
             await _dialogService.ShowAlertAsync("连接测试通过",
                 $"提供商：{display}\n远端根目录：{root}\n\n{detail}");
         }
         catch (OperationCanceledException)
         {
-            StatusMessage = "连接测试超时，请检查网络后重试";
+            ListStatusText = "连接测试超时，请检查网络后重试";
+            IsListHintVisible = true;
             LogService.Warn("云存档", "连接测试超时");
         }
         catch (Exception ex)
         {
-            StatusMessage = ex.Message;
+            ListStatusText = ex.Message;
+            IsListHintVisible = true;
             LogService.Warn("云存档", $"连接测试异常: {ex.Message}");
         }
         finally
