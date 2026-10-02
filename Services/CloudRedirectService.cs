@@ -45,7 +45,7 @@ public interface ICloudRedirectService
     Task<List<RedirectedApp>> GetRedirectedAppsAsync(IProgress<string>? progress = null, CancellationToken ct = default);
     Task<MigrateResult> MigrateSavesAsync(string oldPath, string newPath, IProgress<string>? status, CancellationToken ct = default);
     string GetDefaultSyncPath();
-    Task<DeletePreview> PreviewAppDeleteAsync(int appId, CancellationToken ct = default);
+    Task<DeletePreview> PreviewAppDeleteAsync(int appId, IProgress<string>? progress = null, CancellationToken ct = default);
     Task DeleteAppSavesAsync(DeletePreview preview, IProgress<string>? status, CancellationToken ct = default);
     // 云端源下打开路径的目标地址；本地源返回空，由调用方走目录打开
     string GetCloudConsoleUrl(int appId);
@@ -878,12 +878,13 @@ public class CloudRedirectService : ICloudRedirectService
     }
 
     // 删除预览：收拢同一 appId 在所有账号下的三类本地目录并统计；云端源追加远端目标
-    public async Task<DeletePreview> PreviewAppDeleteAsync(int appId, CancellationToken ct = default)
+    public async Task<DeletePreview> PreviewAppDeleteAsync(int appId, IProgress<string>? progress = null, CancellationToken ct = default)
     {
         var steamPath = ResolveSteamPath();
         if (string.IsNullOrEmpty(steamPath))
             throw new InvalidOperationException("未检测到 Steam 路径");
 
+        progress?.Report("正在读取本地存档信息…");
         var accountIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var targets = new List<DeleteTarget>();
         var syncPath = ResolveSyncPath();
@@ -929,6 +930,7 @@ public class CloudRedirectService : ICloudRedirectService
         var provider = GetCloudProvider();
         if (provider != "folder")
         {
+            progress?.Report("正在读取云端存档信息…");
             List<CloudAppEntry>? cached;
             lock (_cloudLock) { _cloudEntries.TryGetValue(appId, out cached); cached = cached?.ToList(); }
             if (cached == null || cached.Count == 0)
@@ -953,7 +955,7 @@ public class CloudRedirectService : ICloudRedirectService
                     }
                 }
             }
-            foreach (var e in cached)
+            var statTasks = cached.Select(async e =>
             {
                 CloudAppStats stats;
                 try
@@ -964,6 +966,10 @@ public class CloudRedirectService : ICloudRedirectService
                 {
                     throw new InvalidOperationException($"读取云端存档信息失败：{ex.Message}", ex);
                 }
+                return (Entry: e, Stats: stats);
+            }).ToList();
+            foreach (var (e, stats) in await Task.WhenAll(statTasks))
+            {
                 if (!accountIds.Contains(e.AccountId))
                 {
                     accountIds.Add(e.AccountId);

@@ -2,6 +2,7 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -135,6 +136,62 @@ public sealed class CloudProviderStore
                 _listFailures.Add($"{describe(item)}（{reason}）");
         }
         return results.Where(e => e != null).Select(e => e!).OrderBy(e => e.AppId).ToList();
+    }
+
+    // 下载并发：与名单相反语义，任一文件失败整单中止（备份不完整绝不删远端）；
+    // 首个真失败原样抛出，其余取消；成功返回文件数，与旧串行返回值一致
+    private const int DownloadDegree = 4;
+
+    private static async Task<int> RunParallelDownloadAsync<T>(
+        IReadOnlyList<T> items,
+        Func<T, CancellationToken, Task> downloadOne,
+        IProgress<string>? progress,
+        CancellationToken ct)
+    {
+        var done = 0;
+        var errorLock = new object();
+        Exception? firstError = null;
+        using var joint = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var throttle = new SemaphoreSlim(DownloadDegree);
+        var tasks = items.Select(async item =>
+        {
+            await throttle.WaitAsync(joint.Token);
+            try
+            {
+                try
+                {
+                    await downloadOne(item, joint.Token);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    lock (errorLock) firstError ??= ex;
+                    joint.Cancel();
+                    throw;
+                }
+            }
+            finally
+            {
+                throttle.Release();
+                progress?.Report($"正在从云端下载备份({Interlocked.Increment(ref done)}/{items.Count})…");
+            }
+        });
+        try
+        {
+            await Task.WhenAll(tasks);
+        }
+        catch (OperationCanceledException)
+        {
+            ct.ThrowIfCancellationRequested();
+            // 联合取消且有真错误：落下统一抛首错
+        }
+        catch (Exception)
+        {
+            // 真失败：首错已记录，落下统一抛首错
+        }
+        if (firstError != null)
+            ExceptionDispatchInfo.Capture(firstError).Throw();
+        ct.ThrowIfCancellationRequested();
+        return items.Count;
     }
 
     public Task<CloudAppStats> GetAppStatsAsync(string provider, string accountId, int appId, CancellationToken ct) =>
@@ -514,26 +571,22 @@ public sealed class CloudProviderStore
         var appId2 = await GetDriveIdAsync(accountId2, appId.ToString(), token, ct)
             ?? throw new InvalidOperationException($"云端未找到该游戏目录：{appId}");
         var nodes = (await CollectDriveNodesAsync(appId2, "", token, ct)).Where(n => !n.IsFolder).ToList();
-        var done = 0;
-        foreach (var node in nodes)
-        {
-            ct.ThrowIfCancellationRequested();
-            var dest = Path.Combine(destDir, node.RelPath.Replace('/', Path.DirectorySeparatorChar));
-            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-            using var req = new HttpRequestMessage(HttpMethod.Get, $"{DriveApi}/{node.Id}?alt=media");
-            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
-            resp.EnsureSuccessStatusCode();
-            await using var src = await resp.Content.ReadAsStreamAsync(ct);
-            await using var dst = File.Create(dest);
-            await src.CopyToAsync(dst, ct);
-            done++;
-            progress?.Report($"正在从云端下载备份({done}/{nodes.Count})…");
-        }
-        return done;
+        return await RunParallelDownloadAsync(nodes,
+            async (node, ct) =>
+            {
+                var dest = Path.Combine(destDir, node.RelPath.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                using var req = new HttpRequestMessage(HttpMethod.Get, $"{DriveApi}/{node.Id}?alt=media");
+                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+                resp.EnsureSuccessStatusCode();
+                await using var src = await resp.Content.ReadAsStreamAsync(ct);
+                await using var dst = File.Create(dest);
+                await src.CopyToAsync(dst, ct);
+            }, progress, ct);
     }
 
-    // Drive 删除目录必须先清空：文件先删，子目录按深度降序删，最后删 app 目录本身
+    // Drive 删目录自带递归：列举仅用于计数，一次删 app 目录本身即可（语义同逐个删，均进回收站）
     private async Task<CloudDeleteResult> DeleteDriveAppAsync(string accountId, int appId,
         IProgress<string>? progress, CancellationToken ct)
     {
@@ -544,25 +597,11 @@ public sealed class CloudProviderStore
         if (accountId2 == null) return new CloudDeleteResult(0, 0, new List<string>(), $"云端未找到账号目录：{accountId}");
         var appId2 = await GetDriveIdAsync(accountId2, appId.ToString(), token, ct);
         if (appId2 == null) return new CloudDeleteResult(0, 0, new List<string>(), $"云端未找到该游戏目录：{appId}");
-        var nodes = await CollectDriveNodesAsync(appId2, "", token, ct);
-        var ordered = nodes.Where(n => !n.IsFolder)
-            .Concat(nodes.Where(n => n.IsFolder).OrderByDescending(n => n.RelPath.Count(c => c == '/')))
-            .ToList();
-        var deleted = 0;
-        var failed = new List<string>();
-        var done = 0;
-        foreach (var node in ordered)
-        {
-            ct.ThrowIfCancellationRequested();
-            done++;
-            progress?.Report($"正在删除云端存档({done}/{ordered.Count})…");
-            if (await DeleteDriveFileAsync(node.Id, token, ct)) deleted++;
-            else failed.Add(node.RelPath);
-        }
-        if (await DeleteDriveFileAsync(appId2, token, ct)) deleted++;
-        else failed.Add(appId.ToString());
-        return new CloudDeleteResult(deleted, failed.Count, failed.Take(10).ToList(),
-            failed.Count > 0 ? $"{failed.Count} 个远端文件删除失败" : null);
+        var fileCount = (await CollectDriveNodesAsync(appId2, "", token, ct)).Count(n => !n.IsFolder);
+        progress?.Report("正在删除云端存档…");
+        if (!await DeleteDriveFileAsync(appId2, token, ct))
+            return new CloudDeleteResult(0, fileCount, new List<string> { appId.ToString() }, "删除云端目录失败");
+        return new CloudDeleteResult(fileCount, 0, new List<string>(), null);
     }
 
     private async Task<bool> DeleteDriveFileAsync(string fileId, string token, CancellationToken ct)
@@ -742,23 +781,19 @@ public sealed class CloudProviderStore
         var token = await GetOneDriveAccessTokenAsync(ct);
         var appFolderId = await ResolveOneDriveAppIdAsync(accountId, appId, token, ct);
         var files = await CollectGraphFilesAsync(appFolderId, "", token, ct);
-        var done = 0;
-        foreach (var file in files)
-        {
-            ct.ThrowIfCancellationRequested();
-            var dest = Path.Combine(destDir, file.RelPath.Replace('/', Path.DirectorySeparatorChar));
-            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-            using var req = new HttpRequestMessage(HttpMethod.Get, $"{GraphBase}/items/{file.Id}/content");
-            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
-            resp.EnsureSuccessStatusCode();
-            await using var src = await resp.Content.ReadAsStreamAsync(ct);
-            await using var dst = File.Create(dest);
-            await src.CopyToAsync(dst, ct);
-            done++;
-            progress?.Report($"正在从云端下载备份({done}/{files.Count})…");
-        }
-        return done;
+        return await RunParallelDownloadAsync(files,
+            async (file, ct) =>
+            {
+                var dest = Path.Combine(destDir, file.RelPath.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                using var req = new HttpRequestMessage(HttpMethod.Get, $"{GraphBase}/items/{file.Id}/content");
+                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+                resp.EnsureSuccessStatusCode();
+                await using var src = await resp.Content.ReadAsStreamAsync(ct);
+                await using var dst = File.Create(dest);
+                await src.CopyToAsync(dst, ct);
+            }, progress, ct);
     }
 
     // Graph 删除目录默认递归，单次调用即可
@@ -983,7 +1018,8 @@ public sealed class CloudProviderStore
     }
 
     private async Task<HttpResponseMessage> SendS3Async(HttpClient http, string method, S3Endpoint ep,
-        string key, SortedDictionary<string, string> query, CancellationToken ct, string body = "")
+        string key, SortedDictionary<string, string> query, CancellationToken ct, string body = "",
+        IDictionary<string, string>? extraHeaders = null)
     {
         var encodedKey = string.IsNullOrEmpty(key) ? "" : "/" + S3EncodePath(key);
         var canonicalQuery = string.Join("&",
@@ -996,8 +1032,21 @@ public sealed class CloudProviderStore
         // 与 DLL 的 sign_payload 语义一致，R2 恒为 unsigned
         var payloadHash = ep.SignPayload ? Sha256Hex(body) : "UNSIGNED-PAYLOAD";
         var hostHeader = uri.Host + (uri.IsDefaultPort ? "" : $":{uri.Port}");
-        var canonicalHeaders = $"host:{hostHeader}\nx-amz-content-sha256:{payloadHash}\nx-amz-date:{amzDate}\n";
-        var canonical = $"{method}\n/{ep.Bucket}{encodedKey}\n{canonicalQuery}\n{canonicalHeaders}\nhost;x-amz-content-sha256;x-amz-date\n{payloadHash}";
+        // 附加头一并签名；无附加头时拼出的串与原来逐字节一致
+        var signed = new SortedDictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["host"] = hostHeader,
+            ["x-amz-content-sha256"] = payloadHash,
+            ["x-amz-date"] = amzDate,
+        };
+        if (extraHeaders != null)
+        {
+            foreach (var kv in extraHeaders)
+                signed[kv.Key.ToLowerInvariant()] = kv.Value.Trim();
+        }
+        var canonicalHeaders = string.Join("", signed.Select(kv => $"{kv.Key}:{kv.Value}\n"));
+        var signedNames = string.Join(";", signed.Keys);
+        var canonical = $"{method}\n/{ep.Bucket}{encodedKey}\n{canonicalQuery}\n{canonicalHeaders}\n{signedNames}\n{payloadHash}";
         var scope = $"{dateStamp}/{ep.Region}/s3/aws4_request";
         var stringToSign = $"AWS4-HMAC-SHA256\n{amzDate}\n{scope}\n{Sha256Hex(canonical)}";
         var kSecret = Encoding.UTF8.GetBytes("AWS4" + ep.SecretKey);
@@ -1009,8 +1058,19 @@ public sealed class CloudProviderStore
         using var req = new HttpRequestMessage(new HttpMethod(method), uri);
         req.Headers.TryAddWithoutValidation("x-amz-date", amzDate);
         req.Headers.TryAddWithoutValidation("x-amz-content-sha256", payloadHash);
+        if (body.Length > 0)
+            req.Content = new StringContent(body, Encoding.UTF8, "application/xml");
+        if (extraHeaders != null)
+        {
+            // Content-MD5 等属于 content 头，放请求头会被静默丢弃，必须挂到 Content 上
+            foreach (var kv in extraHeaders)
+            {
+                if (!req.Headers.TryAddWithoutValidation(kv.Key, kv.Value))
+                    req.Content?.Headers.TryAddWithoutValidation(kv.Key, kv.Value);
+            }
+        }
         req.Headers.Authorization = new AuthenticationHeaderValue("AWS4-HMAC-SHA256",
-            $"Credential={ep.AccessKey}/{scope}, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={signature}");
+            $"Credential={ep.AccessKey}/{scope}, SignedHeaders={signedNames}, Signature={signature}");
         return await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
     }
 
@@ -1186,27 +1246,61 @@ public sealed class CloudProviderStore
         var objects = await ListS3ObjectsAsync(http, ep, appPrefix, ct);
         if (objects.Count == 0)
             throw new InvalidOperationException($"云端未找到该游戏目录：{appId}");
-        var done = 0;
-        foreach (var obj in objects)
-        {
-            ct.ThrowIfCancellationRequested();
-            var rel = obj.Key.StartsWith(appPrefix, StringComparison.Ordinal) ? obj.Key[appPrefix.Length..] : obj.Key;
-            var dest = Path.Combine(destDir, rel.Replace('/', Path.DirectorySeparatorChar));
-            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-            using var resp = await SendS3Async(http, "GET", ep, obj.Key,
-                new SortedDictionary<string, string>(StringComparer.Ordinal), ct);
-            if (!resp.IsSuccessStatusCode)
+        var query = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        return await RunParallelDownloadAsync(objects,
+            async (obj, ct) =>
             {
-                var body = await resp.Content.ReadAsStringAsync(ct);
-                throw new InvalidOperationException($"下载远端文件失败 {rel}：{S3Error(resp.StatusCode, body)}");
-            }
-            await using var src = await resp.Content.ReadAsStreamAsync(ct);
-            await using var dst = File.Create(dest);
-            await src.CopyToAsync(dst, ct);
-            done++;
-            progress?.Report($"正在从云端下载备份({done}/{objects.Count})…");
+                var rel = obj.Key.StartsWith(appPrefix, StringComparison.Ordinal) ? obj.Key[appPrefix.Length..] : obj.Key;
+                var dest = Path.Combine(destDir, rel.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                using var resp = await SendS3Async(http, "GET", ep, obj.Key, query, ct);
+                if (!resp.IsSuccessStatusCode)
+                {
+                    var body = await resp.Content.ReadAsStringAsync(ct);
+                    throw new InvalidOperationException($"下载远端文件失败 {rel}：{S3Error(resp.StatusCode, body)}");
+                }
+                await using var src = await resp.Content.ReadAsStreamAsync(ct);
+                await using var dst = File.Create(dest);
+                await src.CopyToAsync(dst, ct);
+            }, progress, ct);
+    }
+
+    private static string RelS3Key(string key, string appPrefix) =>
+        key.StartsWith(appPrefix, StringComparison.Ordinal) ? key[appPrefix.Length..] : key;
+
+    // S3 Multi-Object Delete：一次删一批；返回失败的 key（相对桶的全路径）；
+    // 传输级失败（非 2xx、XML 解析失败）抛异常，由调用方回退逐个删
+    private async Task<List<string>> MultiDeleteS3ObjectsAsync(HttpClient http, S3Endpoint ep,
+        S3Object[] chunk, CancellationToken ct)
+    {
+        var doc = new XDocument(new XElement("Delete",
+            new XElement("Quiet", "false"),
+            chunk.Select(o => new XElement("Object", new XElement("Key", o.Key)))));
+        var xml = doc.ToString(SaveOptions.DisableFormatting);
+        var md5 = Convert.ToBase64String(MD5.HashData(Encoding.UTF8.GetBytes(xml)));
+        var query = new SortedDictionary<string, string>(StringComparer.Ordinal) { ["delete"] = "" };
+        using var resp = await SendS3Async(http, "POST", ep, "", query, ct, xml,
+            new Dictionary<string, string> { ["Content-MD5"] = md5 });
+        var body = await resp.Content.ReadAsStringAsync(ct);
+        if (!resp.IsSuccessStatusCode)
+            throw new InvalidOperationException($"批量删除失败：{S3Error(resp.StatusCode, body)}");
+        XNamespace ns = "http://s3.amazonaws.com/doc/2006-03-01/";
+        XDocument result;
+        try
+        {
+            result = XDocument.Parse(body);
         }
-        return done;
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"批量删除响应解析失败：{ex.Message}", ex);
+        }
+        var failed = new List<string>();
+        foreach (var e in NsElements(result.Root!, ns, "Error"))
+        {
+            var key = NsValue(e, ns, "Key");
+            if (key.Length > 0) failed.Add(key);
+        }
+        return failed;
     }
 
     private async Task<CloudDeleteResult> DeleteS3AppAsync(string provider, string accountId, int appId,
@@ -1218,26 +1312,50 @@ public sealed class CloudProviderStore
         var objects = await ListS3ObjectsAsync(http, ep, appPrefix, ct);
         if (objects.Count == 0)
             return new CloudDeleteResult(0, 0, new List<string>(), $"云端未找到该游戏目录：{appId}");
+        // 批量删除（单次最多 1000 个，响应自带逐 key 明细）；整批传输失败才回退逐个删
         var deleted = 0;
         var failed = new List<string>();
         var done = 0;
-        foreach (var obj in objects)
+        foreach (var chunk in objects.Chunk(1000))
         {
             ct.ThrowIfCancellationRequested();
-            done++;
-            progress?.Report($"正在删除云端存档({done}/{objects.Count})…");
+            List<string>? chunkFailed = null;
             try
             {
-                using var resp = await SendS3Async(http, "DELETE", ep, obj.Key,
-                    new SortedDictionary<string, string>(StringComparer.Ordinal), ct);
-                if (resp.StatusCode is HttpStatusCode.OK or HttpStatusCode.NoContent)
-                    deleted++;
-                else
-                    failed.Add(obj.Key[appPrefix.Length..]);
+                chunkFailed = await MultiDeleteS3ObjectsAsync(http, ep, chunk, ct);
             }
-            catch
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                failed.Add(obj.Key[appPrefix.Length..]);
+                LogService.Warn("云存档", $"批量删除失败，回退逐个删除：{ex.Message}");
+            }
+            if (chunkFailed == null)
+            {
+                foreach (var obj in chunk)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    done++;
+                    progress?.Report($"正在删除云端存档({done}/{objects.Count})…");
+                    try
+                    {
+                        using var resp = await SendS3Async(http, "DELETE", ep, obj.Key,
+                            new SortedDictionary<string, string>(StringComparer.Ordinal), ct);
+                        if (resp.StatusCode is HttpStatusCode.OK or HttpStatusCode.NoContent)
+                            deleted++;
+                        else
+                            failed.Add(RelS3Key(obj.Key, appPrefix));
+                    }
+                    catch
+                    {
+                        failed.Add(RelS3Key(obj.Key, appPrefix));
+                    }
+                }
+            }
+            else
+            {
+                done += chunk.Length;
+                progress?.Report($"正在删除云端存档({done}/{objects.Count})…");
+                deleted += chunk.Length - chunkFailed.Count;
+                failed.AddRange(chunkFailed.Select(k => RelS3Key(k, appPrefix)));
             }
         }
         return new CloudDeleteResult(deleted, failed.Count, failed.Take(10).ToList(),

@@ -38,11 +38,8 @@ public partial class CloudSaveViewModel : ObservableObject
     [ObservableProperty]
     private string _syncPathText = "未配置";
 
-    [ObservableProperty]
-    private string _statusMessage = "";
-
-    // 列表区状态行：闲置显示默认提示，连接/读取中与失败时替换显示；
-    // 登录态不再走顶部 StatusMessage，改拼到远端根目录行
+    // 列表区状态行：闲置显示默认提示，连接/读取/删除中与失败时替换显示；
+    // 本页所有操作反馈统一走这里，顶部不再保留任何输出
     [ObservableProperty]
     private string _listStatusText = "暂无已重定向游戏：启用云存档后进游戏存一次档即会出现在列表";
 
@@ -238,6 +235,13 @@ public partial class CloudSaveViewModel : ObservableObject
         IsListHintVisible = true;
     }
 
+    // 本页所有操作反馈统一走列表状态区，顶部不再保留任何输出
+    private void SetListStatus(string message)
+    {
+        ListStatusText = message;
+        IsListHintVisible = true;
+    }
+
     partial void OnSelectedSortOptionChanged(string value) => ApplySorting();
 
     // 名单排序：默认存档时间倒序（无时间沉底），切换只重排不重拉
@@ -286,7 +290,7 @@ public partial class CloudSaveViewModel : ObservableObject
                 var url = _cloudService.GetCloudConsoleUrl(appId);
                 if (string.IsNullOrEmpty(url))
                 {
-                    StatusMessage = "无法定位云端目录，请先刷新名单";
+                    SetListStatus("无法定位云端目录，请先刷新名单");
                     return;
                 }
                 Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
@@ -294,14 +298,14 @@ public partial class CloudSaveViewModel : ObservableObject
             }
             if (!_saveDirs.TryGetValue(appId, out var dir) || !Directory.Exists(dir))
             {
-                StatusMessage = "存档目录不存在";
+                SetListStatus("存档目录不存在");
                 return;
             }
             Process.Start(new ProcessStartInfo { FileName = dir, UseShellExecute = true });
         }
         catch (Exception ex)
         {
-            StatusMessage = "打开存档目录失败";
+            SetListStatus("打开存档目录失败");
             LogService.Warn("云存档", $"打开存档目录失败: {ex.Message}");
         }
     }
@@ -312,7 +316,7 @@ public partial class CloudSaveViewModel : ObservableObject
         if (IsBusy || game == null) return;
         if (SteamProcess.IsSteamRunning())
         {
-            StatusMessage = "请先退出 Steam 再删除存档";
+            SetListStatus("请先退出 Steam 再删除存档");
             await _dialogService.ShowAlertAsync("Steam 正在运行",
                 "删除存档前请先完全退出 Steam，否则残留缓存可能把已删文件复活。");
             return;
@@ -323,17 +327,18 @@ public partial class CloudSaveViewModel : ObservableObject
         DeletePreview preview;
         try
         {
-            preview = await Task.Run(() => _cloudService.PreviewAppDeleteAsync(game.AppId));
+            var previewProgress = new Progress<string>(msg => SetListStatus(msg));
+            preview = await Task.Run(() => _cloudService.PreviewAppDeleteAsync(game.AppId, previewProgress));
         }
         catch (Exception ex)
         {
-            StatusMessage = ex.Message;
+            SetListStatus(ex.Message);
             LogService.Warn("云存档", $"统计待删存档失败: {ex.Message}");
             return;
         }
         if (preview.Targets.Count == 0)
         {
-            StatusMessage = "没有可删除的存档";
+            SetListStatus("没有可删除的存档");
             return;
         }
 
@@ -342,12 +347,15 @@ public partial class CloudSaveViewModel : ObservableObject
             ? "注：云端源下将删除远端存档（本地 DLL 缓存与 Steam 用户数据一并清理），删除前自动下载备份到本地。"
             : null;
         if (!await _dialogService.ShowDeleteSavesConfirmAsync(displayName, game.AppId, preview.Targets, preview.BackupDir, confirmNote))
+        {
+            RestoreIdleListHint();
             return;
+        }
 
         try
         {
             IsBusy = true;
-            var progress = new Progress<string>(msg => StatusMessage = msg);
+            var progress = new Progress<string>(msg => SetListStatus(msg));
             await _cloudService.DeleteAppSavesAsync(preview, progress);
             await RefreshCoreAsync();
             await _dialogService.ShowAlertAsync("删除完成",
@@ -357,7 +365,7 @@ public partial class CloudSaveViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            StatusMessage = ex.Message;
+            SetListStatus(ex.Message);
             LogService.Warn("云存档", $"删除存档失败: {ex.Message}");
         }
         finally
@@ -407,7 +415,7 @@ public partial class CloudSaveViewModel : ObservableObject
                     _settingsService.Save(settings);
                 }
 
-                var progress = new Progress<string>(msg => StatusMessage = msg);
+                var progress = new Progress<string>(msg => SetListStatus(msg));
                 await _cloudService.EnableAsync(null, progress);
                 await PromptRestartSteamAsync("云存档已启用");
             }
@@ -420,7 +428,7 @@ public partial class CloudSaveViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            StatusMessage = ex.Message;
+            SetListStatus(ex.Message);
             LogService.Warn("云存档", $"切换开关失败: {ex.Message}");
             RevertToggle(!value);
         }
@@ -441,7 +449,7 @@ public partial class CloudSaveViewModel : ObservableObject
         var result = SteamProcess.RestartSteam(_steamPathService);
         if (!result.Ok)
         {
-            StatusMessage = result.Message;
+            SetListStatus(result.Message);
             LogService.Warn("云存档", $"重启 Steam 失败: {result.Message}");
         }
     }
@@ -462,7 +470,7 @@ public partial class CloudSaveViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            StatusMessage = "打开目录选择失败，请重试";
+            SetListStatus("打开目录选择失败，请重试");
             LogService.Error("云存档", $"选择本地目录失败: {ex}");
             return;
         }
@@ -476,7 +484,7 @@ public partial class CloudSaveViewModel : ObservableObject
         var def = _cloudService.GetDefaultSyncPath();
         if (string.IsNullOrEmpty(def))
         {
-            StatusMessage = "未检测到 Steam 路径";
+            SetListStatus("未检测到 Steam 路径");
             LogService.Warn("云存档", "重置目录失败：未检测到 Steam 路径");
             return;
         }
@@ -543,7 +551,7 @@ public partial class CloudSaveViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            StatusMessage = ex.Message;
+            SetListStatus(ex.Message);
             LogService.Warn("云存档", $"切换提供商失败: {ex.Message}");
             RefreshProviderStatus();
             return;
@@ -715,14 +723,14 @@ public partial class CloudSaveViewModel : ObservableObject
             using var oauth = new CloudOAuthService();
             var tokenPath = _cloudService.GetTokenPath(SelectedProvider);
             var ok = await oauth.AuthorizeAsync(SelectedProvider, tokenPath, Log, _signInCts.Token);
-            StatusMessage = ok ? "登录成功，重启 Steam 后生效" : "登录未完成";
+            SetListStatus(ok ? "登录成功，重启 Steam 后生效" : "登录未完成");
             if (ok) ScheduleAuthLogAutoClear();
             UpdateSignedInFlag();
             LogService.Info("云存档", $"OAuth 登录{(ok ? "成功" : "未完成")}：{SelectedProvider}");
         }
         catch (Exception ex)
         {
-            StatusMessage = $"登录异常：{ex.Message}";
+            SetListStatus($"登录异常：{ex.Message}");
             LogService.Warn("云存档", $"OAuth 登录异常: {ex.Message}");
         }
         finally
@@ -843,12 +851,12 @@ public partial class CloudSaveViewModel : ObservableObject
             // 退出后清空界面 secret（文件已删，留着旧值误导人）；其他表单项保持原样
             if (target == "r2") R2SecretKey = "";
             if (target == "s3") S3SecretKey = "";
-            StatusMessage = isOAuth ? "已退出登录" : "凭证已清除";
-            LogService.Info("云存档", StatusMessage);
+            SetListStatus(isOAuth ? "已退出登录" : "凭证已清除");
+            LogService.Info("云存档", isOAuth ? "已退出登录" : "凭证已清除");
         }
         catch (Exception ex)
         {
-            StatusMessage = ex.Message;
+            SetListStatus(ex.Message);
             LogService.Warn("云存档", $"退出登录失败: {ex.Message}");
             return;
         }
@@ -871,7 +879,7 @@ public partial class CloudSaveViewModel : ObservableObject
             var path = await Task.Run(() => _cloudService.SaveR2Credentials(new R2Credentials(
                 R2AccountId.Trim(), R2AccessKeyId.Trim(), R2SecretKey,
                 R2Bucket.Trim(), R2KeyPrefix.Trim(), R2Endpoint.Trim())));
-            StatusMessage = $"R2 凭证已保存，重启 Steam 后生效";
+            SetListStatus($"R2 凭证已保存，重启 Steam 后生效");
             LogService.Info("云存档", $"R2 凭证已保存：{path}");
             SyncProviderSelection("r2");
             RefreshEffectiveRoot();
@@ -879,7 +887,7 @@ public partial class CloudSaveViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            StatusMessage = ex.Message;
+            SetListStatus(ex.Message);
             LogService.Warn("云存档", $"保存 R2 凭证失败: {ex.Message}");
         }
         finally { IsBusy = false; }
@@ -896,7 +904,7 @@ public partial class CloudSaveViewModel : ObservableObject
                 S3AccessKeyId.Trim(), S3SecretKey, S3Bucket.Trim(),
                 S3Endpoint.Trim(), S3Region.Trim(), S3KeyPrefix.Trim(),
                 S3SignPayload, S3AllowInsecureHttp, S3AllowInsecureTls, S3CaCertPath.Trim())));
-            StatusMessage = $"S3 凭证已保存，重启 Steam 后生效";
+            SetListStatus($"S3 凭证已保存，重启 Steam 后生效");
             LogService.Info("云存档", $"S3 凭证已保存：{path}");
             SyncProviderSelection("s3");
             RefreshEffectiveRoot();
@@ -904,7 +912,7 @@ public partial class CloudSaveViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            StatusMessage = ex.Message;
+            SetListStatus(ex.Message);
             LogService.Warn("云存档", $"保存 S3 凭证失败: {ex.Message}");
         }
         finally { IsBusy = false; }
@@ -928,7 +936,7 @@ public partial class CloudSaveViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            StatusMessage = "打开文件选择失败，请重试";
+            SetListStatus("打开文件选择失败，请重试");
             LogService.Warn("云存档", $"选择 CA 证书失败: {ex.Message}");
         }
     }
@@ -960,17 +968,17 @@ public partial class CloudSaveViewModel : ObservableObject
             string? migrateFailure = null;
             if (!string.IsNullOrEmpty(current) && System.IO.Directory.Exists(current))
             {
-                var migrateProgress = new Progress<string>(msg => StatusMessage = msg);
+                var migrateProgress = new Progress<string>(msg => SetListStatus(msg));
                 var m = await _cloudService.MigrateSavesAsync(current, dir, migrateProgress);
                 if (m.FailedFiles.Count > 0)
                 {
                     LogService.Warn("云存档", $"迁移失败文件: {string.Join(", ", m.FailedFiles)}");
                     migrateFailure = $"已迁移 {m.MovedFiles} 个文件，{m.FailedFiles.Count} 个失败（可能被 Steam 占用），重启 Steam 后可手动复制剩余文件";
-                    StatusMessage = migrateFailure;
+                    SetListStatus(migrateFailure);
                 }
                 else if (m.MovedFiles > 0)
                 {
-                    StatusMessage = $"已迁移 {m.MovedFiles} 个文件";
+                    SetListStatus($"已迁移 {m.MovedFiles} 个文件");
                 }
             }
             await _cloudService.SetSyncPathAsync(dir);
@@ -978,11 +986,11 @@ public partial class CloudSaveViewModel : ObservableObject
             await RefreshCoreAsync();
             // 刷新会清空状态行，失败摘要需要保留
             if (migrateFailure != null)
-                StatusMessage = migrateFailure;
+                SetListStatus(migrateFailure);
         }
         catch (Exception ex)
         {
-            StatusMessage = ex.Message;
+            SetListStatus(ex.Message);
             LogService.Warn("云存档", $"切换目录失败: {ex.Message}");
         }
         finally

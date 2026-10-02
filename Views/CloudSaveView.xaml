@@ -23,10 +23,6 @@
                 <TextBlock Text="注意：该功能需要电脑已安装VC++运行库才能正常工作"
                            FontSize="12" TextWrapping="Wrap"
                            Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
-                <TextBlock Text="{Binding StatusMessage}" FontSize="12" Margin="0,8,0,0"
-                           TextWrapping="Wrap"
-                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                           Visibility="{Binding StatusMessage, Converter={StaticResource StringNotEmptyToVisibilityConverter}}"/>
             </StackPanel>
 
             <ui:SettingsCard Header="云存档" Margin="0,0,0,8"
