@@ -568,6 +568,7 @@ public partial class App : Application
         services.AddSingleton<IManifestHubService, ManifestHubService>();
         services.AddSingleton<IManifestMonitorService, ManifestMonitorService>();
         services.AddSingleton<IManifestHubKeyService, ManifestHubKeyService>();
+        services.AddSingleton<IOnlineFixService, OnlineFixService>();
 
         services.AddTransient<MainViewModel>();
         services.AddTransient<SettingsViewModel>();
@@ -577,6 +578,7 @@ public partial class App : Application
         services.AddTransient<AchievementViewModel>();
         services.AddTransient<AuthorizationViewModel>();
         services.AddTransient<CloudSaveViewModel>();
+        services.AddTransient<OnlineFixViewModel>();
         services.AddTransient<ManifestViewModel>();
         services.AddTransient<MainWindow>();
     }

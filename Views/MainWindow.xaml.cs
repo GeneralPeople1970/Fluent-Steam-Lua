@@ -25,7 +25,7 @@ namespace SteamLuaManager.Views;
 
 public partial class MainWindow : Window
 {
-    private readonly string[] _navOrder = ["Home", "ScriptDownload", "Manifest", "Extraction", "Authorization", "Trainer", "Achievement", "CloudSave", "Settings", "About"];
+    private readonly string[] _navOrder = ["Home", "ScriptDownload", "Manifest", "Extraction", "Authorization", "Trainer", "Achievement", "CloudSave", "OnlineFix", "Settings", "About"];
     private string _prevTag = "Home";
 
     /// <summary>当前页面 tag，供全局操作日志标注上下文。</summary>
@@ -42,6 +42,7 @@ public partial class MainWindow : Window
     private readonly AuthorizationViewModel _authorizationViewModel;
     private readonly ManifestViewModel _manifestViewModel;
     private readonly CloudSaveViewModel _cloudSaveViewModel;
+    private readonly OnlineFixViewModel _onlineFixViewModel;
     private readonly HomeView _homeView;
     private readonly SettingsView _settingsView;
     private readonly ScriptDownloadView _scriptDownloadView;
@@ -51,6 +52,7 @@ public partial class MainWindow : Window
     private readonly AuthorizationView _authorizationView;
     private readonly ManifestView _manifestView;
     private readonly CloudSaveView _cloudSaveView;
+    private readonly OnlineFixView _onlineFixView;
     private readonly AboutView _aboutView;
     private readonly IOpenSteamToolService _openSteamToolService;
     private CancellationTokenSource? _kernelCts;
@@ -69,7 +71,7 @@ public partial class MainWindow : Window
     private const double FabSize = 44;
     private const double FabPanelGap = 8;
 
-    public MainWindow(MainViewModel viewModel, SettingsViewModel settingsViewModel, ScriptDownloadViewModel scriptDownloadViewModel, ExtractionViewModel extractionViewModel, TrainerViewModel trainerViewModel, AchievementViewModel achievementViewModel, AuthorizationViewModel authorizationViewModel, ManifestViewModel manifestViewModel, CloudSaveViewModel cloudSaveViewModel, ISettingsService settingsService, ISteamPathService steamPathService, IOpenSteamToolService openSteamToolService)
+    public MainWindow(MainViewModel viewModel, SettingsViewModel settingsViewModel, ScriptDownloadViewModel scriptDownloadViewModel, ExtractionViewModel extractionViewModel, TrainerViewModel trainerViewModel, AchievementViewModel achievementViewModel, AuthorizationViewModel authorizationViewModel, ManifestViewModel manifestViewModel, CloudSaveViewModel cloudSaveViewModel, OnlineFixViewModel onlineFixViewModel, ISettingsService settingsService, ISteamPathService steamPathService, IOpenSteamToolService openSteamToolService)
     {
         InitializeComponent();
         CurrentPage = "Home";
@@ -85,6 +87,7 @@ public partial class MainWindow : Window
         _authorizationViewModel = authorizationViewModel;
         _manifestViewModel = manifestViewModel;
         _cloudSaveViewModel = cloudSaveViewModel;
+        _onlineFixViewModel = onlineFixViewModel;
         _settingsService = settingsService;
         _steamPathService = steamPathService;
         DataContext = _viewModel;
@@ -103,6 +106,7 @@ public partial class MainWindow : Window
         _authorizationView = new AuthorizationView { DataContext = authorizationViewModel };
         _manifestView = new ManifestView { DataContext = manifestViewModel };
         _cloudSaveView = new CloudSaveView { DataContext = cloudSaveViewModel };
+        _onlineFixView = new OnlineFixView { DataContext = onlineFixViewModel };
         _aboutView = new AboutView();
         ContentTransition.Content = _homeView;
         SteamMenuList.ItemsSource = new[]
@@ -179,6 +183,7 @@ public partial class MainWindow : Window
                     "Trainer" => TrainerItem,
                     "Achievement" => AchievementItem,
                     "CloudSave" => CloudSaveItem,
+                    "OnlineFix" => OnlineFixItem,
                     "Settings" => SettingsItem,
                     "About" => AboutItem,
                     _ => null
@@ -245,6 +250,7 @@ public partial class MainWindow : Window
         DisposeIfNeeded(_authorizationViewModel);
         DisposeIfNeeded(_manifestViewModel);
         DisposeIfNeeded(_cloudSaveViewModel);
+        DisposeIfNeeded(_onlineFixViewModel);
     }
 
     private static void DisposeIfNeeded(object obj)
@@ -585,6 +591,14 @@ public partial class MainWindow : Window
             _extractionViewModel.LogLines.Clear();
             _extractionViewModel.StatusMessage = "";
         }
+        if (tag != "OnlineFix")
+        {
+            _onlineFixViewModel.CancelDownload();
+            _onlineFixViewModel.LogLines.Clear();
+            _onlineFixViewModel.SearchResults.Clear();
+            _onlineFixViewModel.ResetState();
+            _onlineFixViewModel.StatusMessage = "";
+        }
         if (tag != "Settings")
         {
             // 三个测速结果面板的可见性都绑在集合 Count 上，切出设置页统一清空收起
@@ -624,6 +638,7 @@ public partial class MainWindow : Window
             "Achievement" => _achievementView,
             "Authorization" => _authorizationView,
             "CloudSave" => _cloudSaveView,
+            "OnlineFix" => _onlineFixView,
             "About" => _aboutView,
             _ => null
         };
