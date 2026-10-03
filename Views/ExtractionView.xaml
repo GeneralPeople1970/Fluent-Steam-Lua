@@ -113,7 +113,7 @@
                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"
                                   FontSize="13" Margin="0,0,32,0"
                                   ToolTip="从Steam缓存提取游戏的成就文件"/>
-                        <CheckBox Content="下载 Manifest 清单文件" IsChecked="{Binding DownloadManifests}"
+                        <CheckBox Content="提取 Manifest 清单文件" IsChecked="{Binding DownloadManifests}"
                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"
                                   FontSize="13"
                                   ToolTip="登录后从 Steam CDN 下载各仓库的 Manifest 文件到提取目录"/>

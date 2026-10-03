@@ -300,7 +300,7 @@ public partial class ExtractionViewModel : ObservableObject, IDisposable
             if (DownloadManifests)
             {
                 // 登录门禁已保证会话，直接下载；CDN 下载限流 3 并行，结果按原顺序打日志
-                StatusMessage = "正在下载 Manifest 清单文件...";
+                StatusMessage = "正在提取 Manifest 清单文件...";
                 var seen = new HashSet<(uint, ulong)>();
                 var targets = new List<(PendingDepot Line, ulong Gid)>();
                 foreach (var line in lines)
@@ -328,7 +328,7 @@ public partial class ExtractionViewModel : ObservableObject, IDisposable
                     if (item is not { } done) continue;
                     if (done.R.Success && done.R.FilePath != null) dlOk++;
                     PostLog(done.R.Success && done.R.FilePath != null
-                        ? $"已下载 Manifest：{Path.GetFileName(done.R.FilePath)}"
+                        ? $"已提取 Manifest：{Path.GetFileName(done.R.FilePath)}"
                         : $"Manifest 跳过 ({done.Line.Id})：{done.R.Message}");
                 }
                 // 全挂/部分挂必须在结论里明示，否则"提取完成"误导用户以为全成功

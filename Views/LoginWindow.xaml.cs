@@ -122,11 +122,14 @@ public partial class LoginWindow : Window
     {
         if (LocalAccountList.SelectedItem is not AccountItem item) return;
         var acc = item.User;
+        // 本地登录此前无取消：关窗口/切账号后任务还在后台跑，补上 CTS（Closed 已有取消）
+        _loginCts?.Dispose();
+        _loginCts = new CancellationTokenSource();
         SetBusy(true);
         SetStatus($"正在用本机凭证登录 {acc.AccountName}...");
         try
         {
-            var result = await _accountService.LoginWithLocalAsync(acc.AccountName);
+            var result = await _accountService.LoginWithLocalAsync(acc.AccountName, _loginCts.Token);
             if (result.Success)
             {
                 DialogResult = true;

@@ -491,7 +491,8 @@ public class SteamAccountService : ISteamAccountService
         }
     }
 
-    // token 还有 30 天以上有效期就不折腾；快过期则续期并回写，我抄的 SteamTokenDumper 策略
+    // token 还有 30 天以上有效期就不折腾；快过期则续期并回写，我抄的 SteamTokenDumper 策略。
+    // 续期是 AsyncJob 等回调，连接半死时永不到：必须加总超时，失败只记日志（不影响本次使用）
     private async Task TryRenewTokenAsync(string username, string refreshToken)
     {
         try
@@ -500,8 +501,10 @@ public class SteamAccountService : ISteamAccountService
             if (exp == null || DateTime.UtcNow.AddDays(30) < exp) return;
             var steamId = _client.SteamID;
             if (steamId == null) return;
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             var renewed = await _client.Authentication
                 .GenerateAccessTokenForAppAsync(steamId, refreshToken, allowRenewal: true)
+                .WaitAsync(timeout.Token)
                 .ConfigureAwait(false);
             if (!string.IsNullOrEmpty(renewed.RefreshToken))
             {
@@ -509,6 +512,7 @@ public class SteamAccountService : ISteamAccountService
                 LogService.Info("账号", "refresh token 已续期");
             }
         }
+        catch (OperationCanceledException) { LogService.Warn("账号", "token 续期超时（15 秒），不影响本次使用"); }
         catch (Exception ex) { LogService.Warn("账号", $"token 续期失败（不影响本次使用）: {ex.Message}"); }
     }
 
