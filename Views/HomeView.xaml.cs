@@ -42,24 +42,24 @@ public partial class HomeView : UserControl
         }
     }
 
-    // 入场淡入只播一次：切页/切视图会反复触发 Loaded，在此重复挂 handler 越积越多，
-    // 且每次切回主页都重播 250ms 全子树淡入，是切换卡顿的来源之一
+    // 视图切回/切换淡入：每次可见都播 250ms；Loaded 会反复触发，先摘后挂防 handler 越积越多；
+    // 注意绝不能动 Tag（三个视图的 Tag 是"卡片/列表/表格"模式串，供追加门闩识别）
     private void ViewModeContainer_Loaded(object sender, RoutedEventArgs e)
     {
-        if (sender is not FrameworkElement fe || fe.Tag is true) return;
-        fe.Tag = true;
-        var firstShow = true;
-        fe.IsVisibleChanged += (_, args) =>
+        if (sender is not FrameworkElement fe) return;
+        fe.IsVisibleChanged -= ViewModeContainer_IsVisibleChanged;
+        fe.IsVisibleChanged += ViewModeContainer_IsVisibleChanged;
+    }
+
+    private void ViewModeContainer_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        if (sender is not FrameworkElement fe || e.NewValue is not true) return;
+        fe.Opacity = 0;
+        var animation = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(250))
         {
-            if (args.NewValue is not true || !firstShow) return;
-            firstShow = false;
-            fe.Opacity = 0;
-            var animation = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(250))
-            {
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-            };
-            fe.BeginAnimation(OpacityProperty, animation);
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
         };
+        fe.BeginAnimation(OpacityProperty, animation);
     }
 
     // 首屏补足：内容撑不满视口（无滚动条、下方留白）时补一页，直到填满或取完；

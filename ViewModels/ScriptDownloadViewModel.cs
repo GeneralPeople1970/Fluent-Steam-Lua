@@ -697,11 +697,19 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         return count;
     }
 
+    private const int MaxLogLines = 500;
+
     private void AddLog(string message)
     {
         LogService.Info("入库", message);
         var line = $"[{DateTime.Now:HH:mm:ss}] {message}";
-        Application.Current.Dispatcher.Invoke(() => LogLines.Add(line));
+        // 异步投递不阻塞工作线程；顺序与调用序一致
+        _ = Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            LogLines.Add(line);
+            while (LogLines.Count > MaxLogLines)
+                LogLines.RemoveAt(0);
+        });
     }
 
     [RelayCommand]

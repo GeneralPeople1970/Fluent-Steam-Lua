@@ -1,4 +1,5 @@
-﻿using System.IO;
+﻿using System.Collections.ObjectModel;
+using System.IO;
 using System.Text.RegularExpressions;
 using SteamLuaManager.Models;
 
@@ -11,13 +12,76 @@ public class LuaFileManager : ILuaFileManager, IDisposable
     private bool _isWatching;
     private CancellationTokenSource? _debounceCts;
 
-    private static readonly Regex AddAppIdRegex = new(@"addappid\((\d+)\)", RegexOptions.IgnoreCase);
-    private static readonly Regex AddDepotRegex = new(@"addappid\((\d+),\s*(\d+),\s*""([^""]+)""\)", RegexOptions.IgnoreCase);
-    private static readonly Regex AddTokenRegex = new(@"addtoken\((\d+),\s*""([^""]+)""\)", RegexOptions.IgnoreCase);
-    private static readonly Regex ManifestPinRegex = new(@"^\s*setManifestid\((\d+),\s*""(\d+)""(?:\s*,\s*(\d+))?\)", RegexOptions.IgnoreCase | RegexOptions.Multiline);
-    private static readonly Regex ManifestPinCommentedRegex = new(@"^\s*--\s*setManifestid\((\d+),\s*""(\d+)""(?:\s*,\s*(\d+))?\)", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+    private static readonly Regex AddAppIdRegex = new(@"addappid\((\d+)\)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex AddDepotRegex = new(@"addappid\((\d+),\s*(\d+),\s*""([^""]+)""\)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex AddTokenRegex = new(@"addtoken\((\d+),\s*""([^""]+)""\)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex ManifestPinRegex = new(@"^\s*setManifestid\((\d+),\s*""(\d+)""(?:\s*,\s*(\d+))?\)", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled);
+    private static readonly Regex ManifestPinCommentedRegex = new(@"^\s*--\s*setManifestid\((\d+),\s*""(\d+)""(?:\s*,\s*(\d+))?\)", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled);
 
     public event EventHandler? FilesChanged;
+
+    // 解析模板缓存：未变文件跳过读盘+正则；模板只存解析产物，深拷贝后装配新实例，
+    // 与现扫结果逐字段一致（Token/Depot/BareAppIds/IsManifestPinned）
+    private sealed class CachedLuaParse
+    {
+        public DateTime Mtime;
+        public long Length;
+        public string Token = string.Empty;
+        public bool IsManifestPinned;
+        public List<DepotInfo> Depots = new();
+        public List<int> BareAppIds = new();
+    }
+
+    private readonly Dictionary<string, CachedLuaParse> _parseCache = new(StringComparer.OrdinalIgnoreCase);
+
+    private static DepotInfo CopyDepot(DepotInfo d) => new()
+    {
+        DepotId = d.DepotId, Key = d.Key, ManifestId = d.ManifestId, IsPinned = d.IsPinned
+    };
+
+    private GameInfo GetOrParseLuaGame(string file, int appId, bool isDisabled, HashSet<string> seen)
+    {
+        seen.Add(file);
+        var fi = new FileInfo(file);
+        var mtime = fi.Exists ? fi.LastWriteTime : DateTime.MinValue;
+        var length = fi.Exists ? fi.Length : -1;
+        CachedLuaParse? template = null;
+        lock (_parseCache)
+        {
+            if (fi.Exists && _parseCache.TryGetValue(file, out var cached)
+                && cached.Mtime == mtime && cached.Length == length)
+                template = cached;
+        }
+        var game = new GameInfo
+        {
+            AppId = appId,
+            LuaFilePath = file,
+            LuaFileTime = mtime,
+            IsDisabled = isDisabled
+        };
+        if (template != null)
+        {
+            game.Token = template.Token;
+            game.IsManifestPinned = template.IsManifestPinned;
+            game.Depots = new ObservableCollection<DepotInfo>(template.Depots.Select(CopyDepot));
+            game.BareAppIds = new List<int>(template.BareAppIds);
+            return game;
+        }
+        ParseLuaContent(game);
+        lock (_parseCache)
+        {
+            _parseCache[file] = new CachedLuaParse
+            {
+                Mtime = mtime,
+                Length = length,
+                Token = game.Token,
+                IsManifestPinned = game.IsManifestPinned,
+                Depots = game.Depots.Select(CopyDepot).ToList(),
+                BareAppIds = new List<int>(game.BareAppIds)
+            };
+        }
+        return game;
+    }
 
     public LuaFileManager(ISteamPathService steamPathService)
     {
@@ -34,21 +98,12 @@ public class LuaFileManager : ILuaFileManager, IDisposable
                 return result;
 
             var luaFiles = Directory.GetFiles(luaFolder, "*.lua");
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var file in luaFiles)
             {
                 var fileName = Path.GetFileNameWithoutExtension(file);
                 if (int.TryParse(fileName, out var appId))
-                {
-                    var game = new GameInfo
-                    {
-                        AppId = appId,
-                        LuaFilePath = file,
-                        LuaFileTime = File.GetLastWriteTime(file),
-                        IsDisabled = false
-                    };
-                    ParseLuaContent(game);
-                    result.Add(game);
-                }
+                    result.Add(GetOrParseLuaGame(file, appId, false, seen));
             }
 
             var disableFolder = Path.Combine(luaFolder, "Disable");
@@ -63,17 +118,15 @@ public class LuaFileManager : ILuaFileManager, IDisposable
                     {
                         if (seenAppIds.Add(appId) == false) continue;
 
-                        var game = new GameInfo
-                        {
-                            AppId = appId,
-                            LuaFilePath = file,
-                            LuaFileTime = File.GetLastWriteTime(file),
-                            IsDisabled = true
-                        };
-                        ParseLuaContent(game);
-                        result.Add(game);
+                        result.Add(GetOrParseLuaGame(file, appId, true, seen));
                     }
                 }
+            }
+
+            lock (_parseCache)
+            {
+                foreach (var dead in _parseCache.Keys.Where(k => !seen.Contains(k)).ToList())
+                    _parseCache.Remove(dead);
             }
 
             return result;

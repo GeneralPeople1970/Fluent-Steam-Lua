@@ -360,11 +360,14 @@ public class CloudRedirectService : ICloudRedirectService
         {
             try
             {
-                using var fs = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                using var ms = new MemoryStream();
-                fs.CopyTo(ms);
-                if (CryptographicOperations.FixedTimeEquals(SHA256.HashData(embedded), SHA256.HashData(ms.ToArray())))
-                    return;
+                // 长度先行：不等必不同，省掉两次哈希；相等才流式哈希比对（不进内存整份拷贝）
+                if (new FileInfo(target).Length == embedded.Length)
+                {
+                    using var fs = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    using var sha = SHA256.Create();
+                    if (CryptographicOperations.FixedTimeEquals(SHA256.HashData(embedded), sha.ComputeHash(fs)))
+                        return;
+                }
             }
             catch { }
             // 目标被 Steam 占用时覆盖必失败，先探后写
@@ -1008,7 +1011,8 @@ public class CloudRedirectService : ICloudRedirectService
         long bytes = 0;
         try
         {
-            foreach (var file in Directory.GetFiles(path, "*", SearchOption.AllDirectories))
+            // 流式枚举：大目录不物化全量数组
+            foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
             {
                 try
                 {
@@ -1116,18 +1120,22 @@ public class CloudRedirectService : ICloudRedirectService
         _ => kind
     };
 
+    // 单遍遍历：目录项建目录（含空目录），文件项确保父目录后拷贝；
+    // 与原来两遍结果一致（含空目录保留），中途失败同样上抛由调用方中止
     private static void CopyDirectory(string source, string dest, CancellationToken ct)
     {
         Directory.CreateDirectory(dest);
-        foreach (var dir in Directory.GetDirectories(source, "*", SearchOption.AllDirectories))
+        foreach (var entry in Directory.EnumerateFileSystemEntries(source, "*", SearchOption.AllDirectories))
         {
             ct.ThrowIfCancellationRequested();
-            Directory.CreateDirectory(Path.Combine(dest, Path.GetRelativePath(source, dir)));
-        }
-        foreach (var file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
-        {
-            ct.ThrowIfCancellationRequested();
-            File.Copy(file, Path.Combine(dest, Path.GetRelativePath(source, file)), overwrite: true);
+            var target = Path.Combine(dest, Path.GetRelativePath(source, entry));
+            if (Directory.Exists(entry))
+                Directory.CreateDirectory(target);
+            else if (File.Exists(entry))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                File.Copy(entry, target, overwrite: true);
+            }
         }
     }
 }

@@ -6,7 +6,6 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Threading;
 using SAM.API;
 using SAM.API.Types;
 using SteamLuaManager.Models;
@@ -16,7 +15,6 @@ namespace SteamLuaManager.Services;
 public sealed class SteamAchievementService : ISteamAchievementService
 {
     private Client? _client;
-    private DispatcherTimer? _callbackTimer;
     private TaskCompletionSource<UserStatsReceived>? _pendingStatsTcs;
     private string _steamPath = "";
     private bool _callbackErrorLogged;
@@ -59,24 +57,8 @@ public sealed class SteamAchievementService : ISteamAchievementService
             var callback = client.CreateAndRegisterCallback<SAM.API.Callbacks.UserStatsReceived>();
             callback.OnRun += OnUserStatsReceived;
 
-            _callbackTimer = new DispatcherTimer(DispatcherPriority.Background)
-            {
-                Interval = TimeSpan.FromMilliseconds(100)
-            };
-            _callbackTimer.Tick += (_, _) =>
-            {
-                try { client.RunCallbacks(false); _callbackErrorLogged = false; }
-                catch (Exception ex)
-                {
-                    if (!_callbackErrorLogged)
-                    {
-                        _callbackErrorLogged = true;
-                        LogService.Warn("成就", $"Steam 回调执行失败: {ex.Message}");
-                    }
-                }
-            };
-            _callbackTimer.Start();
-
+            // 回调只在 WaitForStatsReady 等待期内由手动 PumpCallbacks 消费，
+            // 常驻 UI 计时器泵在等待期外零可观察效应，直接去掉省 10Hz UI 唤醒
             _client = client;
             LastError = null;
             return true;
@@ -136,8 +118,6 @@ public sealed class SteamAchievementService : ISteamAchievementService
 
     private void TryDisposeClient()
     {
-        try { _callbackTimer?.Stop(); } catch { }
-        _callbackTimer = null;
         _client?.Dispose();
         _client = null;
     }
@@ -430,14 +410,16 @@ public sealed class SteamAchievementService : ISteamAchievementService
                             foreach (var bit in bits.Children)
                             {
                                 var id = bit["name"].AsString("");
+                                // display 节点每成就只取一次复用，避免同一小列表重复线性查找 5 次
+                                var display = bit["display"];
                                 achievements.Add(new AchievementDefinition
                                 {
                                     Id = id,
-                                    Name = GetLocalizedString(bit["display"]["name"], language, id),
-                                    Description = GetLocalizedString(bit["display"]["desc"], language, ""),
-                                    IconNormal = bit["display"]["icon"].AsString(""),
-                                    IconLocked = bit["display"]["icon_gray"].AsString(""),
-                                    IsHidden = bit["display"]["hidden"].AsBoolean(false),
+                                    Name = GetLocalizedString(display["name"], language, id),
+                                    Description = GetLocalizedString(display["desc"], language, ""),
+                                    IconNormal = display["icon"].AsString(""),
+                                    IconLocked = display["icon_gray"].AsString(""),
+                                    IsHidden = display["hidden"].AsBoolean(false),
                                     Permission = bit["permission"].AsInteger(0)
                                 });
                             }

@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
@@ -75,7 +77,81 @@ public partial class TrainerViewModel : ObservableObject, IDisposable
 
     private void MonitorPollTimer_Tick(object? sender, EventArgs e)
     {
-        RefreshMonitorStatus();
+        _ = PollMonitorOnceAsync();
+    }
+
+    private bool _monitorBusy;
+
+    // 监控状态轮询：快照放池线程、无激活绑定时停表；异常内部吞掉（定时器上下文无 await 调用方）
+    private async Task PollMonitorOnceAsync()
+    {
+        if (_monitorBusy) return;
+        _monitorBusy = true;
+        try
+        {
+            if (!TrainerBindings.Any(b => b.IsEnabled))
+            {
+                MonitorStatusText = " -  未有激活绑定项，SvcMonitor后台服务已结束进程";
+                _monitorPollTimer?.Stop();
+                return;
+            }
+            if (_monitorPollTimer is { } timer && !timer.IsEnabled)
+                timer.Start();
+            var procName = Path.GetFileNameWithoutExtension(MonitorExePath);
+            var running = await Task.Run(() =>
+            {
+                foreach (var p in Process.GetProcessesByName(procName))
+                {
+                    using (p)
+                    {
+                        if (!p.HasExited) return true;
+                    }
+                }
+                return false;
+            });
+            MonitorStatusText = running
+                ? " -  SvcMonitor后台服务正在运行"
+                : " -  SvcMonitor后台服务未运行";
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("修改器", $"轮询监控状态失败: {ex.Message}");
+        }
+        finally
+        {
+            _monitorBusy = false;
+        }
+    }
+
+    private void OnBindingsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.OldItems != null)
+        {
+            foreach (TrainerBinding b in e.OldItems)
+                b.PropertyChanged -= OnBindingPropertyChanged;
+        }
+        if (e.NewItems != null)
+        {
+            foreach (TrainerBinding b in e.NewItems)
+                b.PropertyChanged += OnBindingPropertyChanged;
+        }
+    }
+
+    private void OnBindingPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(TrainerBinding.IsEnabled))
+            _ = PollMonitorOnceAsync();
+    }
+
+    private void EnsureBindingsHooked()
+    {
+        TrainerBindings.CollectionChanged -= OnBindingsChanged;
+        TrainerBindings.CollectionChanged += OnBindingsChanged;
+        foreach (var b in TrainerBindings)
+        {
+            b.PropertyChanged -= OnBindingPropertyChanged;
+            b.PropertyChanged += OnBindingPropertyChanged;
+        }
     }
 
     [ObservableProperty]
@@ -116,11 +192,12 @@ public partial class TrainerViewModel : ObservableObject, IDisposable
         _autoLaunchService.StatusChanged += OnAutoLaunchStatusChanged;
         _settingsService.SettingsChanged += OnSettingsChanged;
         LoadBindings();
+        EnsureBindingsHooked();
         IsServiceInstalled = IsMonitorInstalled();
         RefreshMonitorStatus();
         _monitorPollTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         _monitorPollTimer.Tick += MonitorPollTimer_Tick;
-        _monitorPollTimer.Start();
+        _ = PollMonitorOnceAsync();
     }
 
     private void OnSettingsChanged(AppSettings settings)
@@ -141,6 +218,9 @@ public partial class TrainerViewModel : ObservableObject, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        TrainerBindings.CollectionChanged -= OnBindingsChanged;
+        foreach (var b in TrainerBindings)
+            b.PropertyChanged -= OnBindingPropertyChanged;
         _autoLaunchService.StatusChanged -= OnAutoLaunchStatusChanged;
         _settingsService.SettingsChanged -= OnSettingsChanged;
         if (_statusTimer != null)
@@ -361,9 +441,12 @@ public partial class TrainerViewModel : ObservableObject, IDisposable
     private void LoadBindings()
     {
         var bindings = _settingsService.Load().TrainerBindings;
+        foreach (var old in TrainerBindings)
+            old.PropertyChanged -= OnBindingPropertyChanged;
         TrainerBindings.Clear();
         foreach (var b in bindings)
             TrainerBindings.Add(b);
+        EnsureBindingsHooked();
     }
 
     private static string SharedBindingsPath => Path.Combine(
@@ -378,7 +461,7 @@ public partial class TrainerViewModel : ObservableObject, IDisposable
         _autoLaunchService.ReloadBindings();
         WriteSharedBindings();
         TryStartMonitorIfNeeded();
-        RefreshMonitorStatus();
+        _ = PollMonitorOnceAsync();
     }
 
     private void WriteSharedBindings()
@@ -448,7 +531,18 @@ public partial class TrainerViewModel : ObservableObject, IDisposable
     private void RefreshMonitorStatus()
     {
         var procName = Path.GetFileNameWithoutExtension(MonitorExePath);
-        var running = Process.GetProcessesByName(procName).Any(p => !p.HasExited);
+        var running = false;
+        foreach (var p in Process.GetProcessesByName(procName))
+        {
+            using (p)
+            {
+                if (!p.HasExited)
+                {
+                    running = true;
+                    break;
+                }
+            }
+        }
         var anyEnabled = TrainerBindings.Any(b => b.IsEnabled);
         if (running)
             MonitorStatusText = " -  SvcMonitor后台服务正在运行";
@@ -463,7 +557,19 @@ public partial class TrainerViewModel : ObservableObject, IDisposable
         try
         {
             var procName = Path.GetFileNameWithoutExtension(MonitorExePath);
-            if (Process.GetProcessesByName(procName).Any(p => !p.HasExited))
+            var alreadyRunning = false;
+            foreach (var p in Process.GetProcessesByName(procName))
+            {
+                using (p)
+                {
+                    if (!p.HasExited)
+                    {
+                        alreadyRunning = true;
+                        break;
+                    }
+                }
+            }
+            if (alreadyRunning)
                 return;
             if (!TrainerBindings.Any(b => b.IsEnabled))
                 return;

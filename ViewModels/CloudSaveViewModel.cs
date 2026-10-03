@@ -717,7 +717,12 @@ public partial class CloudSaveViewModel : ObservableObject
         _authLogGeneration++;
         AuthLogLines.Clear();
         _signInCts = new CancellationTokenSource();
-        void Log(string msg) => System.Windows.Application.Current?.Dispatcher.InvokeAsync(() => AuthLogLines.Add($"[{DateTime.Now:HH:mm:ss}] {msg}"));
+        void Log(string msg) => System.Windows.Application.Current?.Dispatcher.InvokeAsync(() =>
+        {
+            AuthLogLines.Add($"[{DateTime.Now:HH:mm:ss}] {msg}");
+            while (AuthLogLines.Count > 500)
+                AuthLogLines.RemoveAt(0);
+        });
         try
         {
             using var oauth = new CloudOAuthService();

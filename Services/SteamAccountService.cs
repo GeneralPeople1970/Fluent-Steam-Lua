@@ -397,6 +397,9 @@ public class SteamAccountService : ISteamAccountService
     public void LogOff()
     {
         try { _user.LogOff(); } catch { }
+        // 用户主动登出才停回调循环；LogOffInternal（登录切换前）不能停，后续登录还靠它泵回调；
+        // 下次 EnsureConnected 会按需重起
+        try { _loopCts?.Cancel(); } catch { }
         IsLoggedOn = false;
         CurrentAccountName = null;
         // 退出即忘：清掉缓存凭证，否则状态区还会显示已登录
@@ -464,12 +467,12 @@ public class SteamAccountService : ISteamAccountService
     {
         while (!ct.IsCancellationRequested)
         {
-            try { _manager.RunWaitCallbacks(TimeSpan.FromMilliseconds(100)); }
+            try { _manager.RunWaitCallbacks(TimeSpan.FromMilliseconds(500)); }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
                 LogService.Warn("账号", $"Steam 回调循环异常: {ex.Message}");
-                try { Task.Delay(100, ct).Wait(ct); } catch { break; }
+                try { Task.Delay(500, ct).Wait(ct); } catch { break; }
             }
         }
     }

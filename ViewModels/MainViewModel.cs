@@ -187,6 +187,10 @@ namespace SteamLuaManager.ViewModels;
 		_refreshCts = null;
 		refreshCts?.Cancel();
 		refreshCts?.Dispose();
+		var filterCts = _filterCts;
+		_filterCts = null;
+		filterCts?.Cancel();
+		filterCts?.Dispose();
 		_progressTimer?.Stop();
 		_progressTimer = null;
 		_statusMessageTimer?.Dispose();
@@ -251,7 +255,7 @@ namespace SteamLuaManager.ViewModels;
 		{
 			_allGames = await _luaFileManager.ScanLuaFilesAsync();
 			await Task.Run(() => _steamApiService.PopulateFromCache(_allGames));
-			ApplyFilter();
+			await ApplyFilterAsync();
 			UpdateStatus();
 			scanOk = true;
 		}
@@ -393,7 +397,7 @@ namespace SteamLuaManager.ViewModels;
 			var newGames = await _luaFileManager.ScanLuaFilesAsync();
 			_allGames = newGames;
 			await Task.Run(() => _steamApiService.PopulateFromCache(_allGames));
-			ApplyFilter();
+			await ApplyFilterAsync();
 			UpdateStatus();
 			scanOk = true;
 		}
@@ -419,12 +423,11 @@ namespace SteamLuaManager.ViewModels;
 	private void SearchDebounceTimer_Tick(object? sender, EventArgs e)
 	{
 		_searchDebounceTimer?.Stop();
-		ApplyFilter();
-		UpdateStatus();
+		_ = ApplyFilterAsync();
 	}
 
-	partial void OnSelectedSortOptionChanged(string value) { ApplyFilter(); }
-	partial void OnSelectedDisableFilterChanged(string value) { ApplyFilter(); }
+	partial void OnSelectedSortOptionChanged(string value) { _ = ApplyFilterAsync(); }
+	partial void OnSelectedDisableFilterChanged(string value) { _ = ApplyFilterAsync(); }
 	partial void OnSelectedViewModeChanged(string value)
 	{
 		var settings = _settingsService.Load();
@@ -444,38 +447,62 @@ namespace SteamLuaManager.ViewModels;
 			Games.Add(game);
 	}
 
-	private void ApplyFilter()
+	private CancellationTokenSource? _filterCts;
+	private int _filterVersion;
+
+	// 过滤排序放池线程：快照参数+版本号+源引用三重 guard，过期结果直接丢弃；
+	// 集合替换与状态通知仍回 UI 线程，GameInfo 跨线程读与现有后台回填一致
+	private async Task ApplyFilterAsync()
 	{
+		var version = Interlocked.Increment(ref _filterVersion);
+		_filterCts?.Cancel();
+		_filterCts?.Dispose();
+		_filterCts = new CancellationTokenSource();
+		var ct = _filterCts.Token;
 		var query = SearchText?.Trim() ?? string.Empty;
-		IEnumerable<GameInfo> filtered = string.IsNullOrWhiteSpace(query)
-			? _allGames
-			: _allGames.Where(g =>
+		var disableFilter = SelectedDisableFilter;
+		var sortOption = SelectedSortOption;
+		var source = _allGames;
+		List<GameInfo> filtered;
+		try
+		{
+			filtered = await Task.Run(() =>
 			{
-				var nameMatch = g.GameName.Contains(query, StringComparison.OrdinalIgnoreCase);
-				var idMatch = g.AppId.ToString().Contains(query, StringComparison.OrdinalIgnoreCase);
-				return nameMatch || idMatch;
-			});
+				IEnumerable<GameInfo> q = string.IsNullOrWhiteSpace(query)
+					? source
+					: source.Where(g =>
+					{
+						var nameMatch = g.GameName.Contains(query, StringComparison.OrdinalIgnoreCase);
+						var idMatch = g.AppId.ToString().Contains(query, StringComparison.OrdinalIgnoreCase);
+						return nameMatch || idMatch;
+					});
 
-		filtered = SelectedDisableFilter switch
-		{
-			"已启用入库" => filtered.Where(g => !g.IsDisabled),
-			"已禁用入库" => filtered.Where(g => g.IsDisabled),
-			_ => filtered
-		};
+				q = disableFilter switch
+				{
+					"已启用入库" => q.Where(g => !g.IsDisabled),
+					"已禁用入库" => q.Where(g => g.IsDisabled),
+					_ => q
+				};
 
-		filtered = SelectedSortOption switch
-		{
-			"名称 Z-A" => filtered.OrderByDescending(g => g.GameName),
-			"AppID 升序" => filtered.OrderBy(g => g.AppId),
-			"AppID 降序" => filtered.OrderByDescending(g => g.AppId),
-			"入库时间升序" => filtered.OrderBy(g => g.LuaFileTime),
-			"入库时间降序" => filtered.OrderByDescending(g => g.LuaFileTime),
-			_ => filtered.OrderBy(g => g.GameName)
-		};
+				q = sortOption switch
+				{
+					"名称 Z-A" => q.OrderByDescending(g => g.GameName),
+					"AppID 升序" => q.OrderBy(g => g.AppId),
+					"AppID 降序" => q.OrderByDescending(g => g.AppId),
+					"入库时间升序" => q.OrderBy(g => g.LuaFileTime),
+					"入库时间降序" => q.OrderByDescending(g => g.LuaFileTime),
+					_ => q.OrderBy(g => g.GameName)
+				};
 
-		_filteredCache = filtered.ToList();
+				return q.ToList();
+			}, ct);
+		}
+		catch (OperationCanceledException) { return; }
+		if (version != _filterVersion || !ReferenceEquals(_allGames, source)) return;
+		_filteredCache = filtered;
 		Games = new ObservableCollection<GameInfo>(_filteredCache.Take(GamesPageSize));
 		NotifySelectionChanged();
+		UpdateStatus();
 	}
 
 	private void UpdateStatus() => StatusText = $"共 {_filteredCache.Count} 个游戏";

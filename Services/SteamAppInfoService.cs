@@ -146,13 +146,13 @@ public sealed class SteamAppInfoService : ISteamAppInfoService, IDisposable
         {
             try
             {
-                _manager.Value.RunWaitCallbacks(TimeSpan.FromMilliseconds(100));
+                _manager.Value.RunWaitCallbacks(TimeSpan.FromMilliseconds(500));
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
                 LogService.Warn("AppInfo", $"Steam 回调循环异常: {ex.Message}");
-                try { Task.Delay(100, ct).Wait(ct); } catch { break; }
+                try { Task.Delay(500, ct).Wait(ct); } catch { break; }
             }
         }
     }

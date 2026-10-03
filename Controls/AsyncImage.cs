@@ -35,8 +35,10 @@ public class AsyncImage : Image
     }
 
     private static readonly ConcurrentDictionary<string, BitmapImage> Cache = new();
+    private static readonly ConcurrentQueue<string> CacheOrder = new();
     private static readonly SemaphoreSlim Throttle = new(4);
     private const int MaxCacheCount = 600;
+    private const int TrimBatchSize = 150;
 
     private string _pendingUrl = "";
     private bool _started;
@@ -100,6 +102,7 @@ public class AsyncImage : Image
 
         if (Cache.TryGetValue(url, out var cached))
         {
+            CacheOrder.Enqueue(url);
             Source = cached;
             return;
         }
@@ -176,9 +179,15 @@ public class AsyncImage : Image
             return;
         }
 
+        // 满额淘汰最先加入的一批，避免 Clear() 式悬崖导致可见项集中重解码；
+        // 并发重复淘汰最多多删一批，有界自愈
         if (Cache.Count >= MaxCacheCount)
-            Cache.Clear();
+        {
+            for (var i = 0; i < TrimBatchSize && CacheOrder.TryDequeue(out var oldKey); i++)
+                Cache.TryRemove(oldKey, out _);
+        }
         Cache[url] = bitmap;
+        CacheOrder.Enqueue(url);
         await dispatcher.InvokeAsync(() =>
         {
             if (image.SourceUrl == url)

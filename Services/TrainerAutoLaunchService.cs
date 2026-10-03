@@ -71,7 +71,10 @@ public class TrainerAutoLaunchService : ITrainerAutoLaunchService
         {
             try
             {
-                await Task.Delay(2000, ct);
+                bool hasEnabled;
+                lock (_lock) { hasEnabled = _bindings.Any(b => b.IsEnabled); }
+                // 无激活绑定时退避到 10 秒（新绑定最多晚 8 秒被拾取，可接受）
+                await Task.Delay(hasEnabled ? 2000 : 10000, ct);
                 ProcessBindings();
             }
             catch (OperationCanceledException) { break; }

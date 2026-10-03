@@ -405,11 +405,18 @@ public partial class ExtractionViewModel : ObservableObject, IDisposable
         }
     }
 
+    private const int MaxLogLines = 500;
+
     private void PostLog(string message)
     {
         LogService.Info("提取", message);
         var line = $"[{DateTime.Now:HH:mm:ss}] {message}";
-        _ = Application.Current.Dispatcher.InvokeAsync(() => LogLines.Add(line));
+        _ = Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            LogLines.Add(line);
+            while (LogLines.Count > MaxLogLines)
+                LogLines.RemoveAt(0);
+        });
     }
 
     public void Dispose()

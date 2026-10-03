@@ -1,15 +1,17 @@
 using System.IO;
 using System.Text.Json.Serialization;
+using CommunityToolkit.Mvvm.ComponentModel;
 
 namespace SteamLuaManager.Models;
 
-public class TrainerBinding
+public partial class TrainerBinding : ObservableObject
 {
     public string GameName { get; set; } = string.Empty;
     public string GameExePath { get; set; } = string.Empty;
     public string TrainerFilePath { get; set; } = string.Empty;
     public string TrainerDisplayName { get; set; } = string.Empty;
-    public bool IsEnabled { get; set; } = true;
+    [ObservableProperty]
+    private bool _isEnabled = true;
 
     [JsonIgnore]
     public string TrainerFileName => Path.GetFileName(TrainerFilePath);

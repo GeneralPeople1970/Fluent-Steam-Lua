@@ -18,7 +18,46 @@ public static class AppInfoVdf
 
     public sealed record AppEntry(uint AppId, string? Type, string? Name);
 
+    // 跨服务共享缓存：同一文件同 mtime 直接复用，调用方拿到的是浅拷贝，各自过滤互不影响
+    private static readonly object _cacheLock = new();
+    private static string? _cachedPath;
+    private static DateTime _cachedMtime;
+    private static long _cachedLength;
+    private static List<AppEntry>? _cachedEntries;
+
     public static List<AppEntry> Parse(string path)
+    {
+        DateTime mtime;
+        long length;
+        try
+        {
+            var fi = new FileInfo(path);
+            if (!fi.Exists) return new List<AppEntry>();
+            mtime = fi.LastWriteTime;
+            length = fi.Length;
+        }
+        catch
+        {
+            return new List<AppEntry>();
+        }
+        lock (_cacheLock)
+        {
+            if (_cachedEntries != null && _cachedPath == path && _cachedMtime == mtime && _cachedLength == length)
+                return new List<AppEntry>(_cachedEntries);
+        }
+
+        var result = ParseUncached(path);
+        lock (_cacheLock)
+        {
+            _cachedPath = path;
+            _cachedMtime = mtime;
+            _cachedLength = length;
+            _cachedEntries = result;
+        }
+        return new List<AppEntry>(result);
+    }
+
+    private static List<AppEntry> ParseUncached(string path)
     {
         var result = new List<AppEntry>();
         if (!File.Exists(path)) return result;

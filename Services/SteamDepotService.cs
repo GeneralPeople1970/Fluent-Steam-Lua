@@ -769,19 +769,15 @@ public class SteamDepotService : ISteamDepotService
                 }
 
                 string? dlcMainKey = null;
-                try
+                // 常驻字典按 mtime 复用：Ensure 刚刷新过文件会重读，与上面整文件重解析等价
+                var (refreshedKeys, _) = await LoadKeyDictionariesAsync(ct);
+                if (refreshedKeys == null)
                 {
-                    await using var fs = File.OpenRead(GetDepotKeysPath());
-                    using var doc = await JsonDocument.ParseAsync(fs, cancellationToken: ct);
-                    if (doc.RootElement.TryGetProperty(dlcAppId.ToString(), out var val))
-                        dlcMainKey = val.GetString();
-                }
-                catch (Exception ex)
-                {
-                    LogService.Warn("获取DLC", $"读取密钥文件失败: {ex.Message}");
+                    LogService.Warn("获取DLC", "读取密钥仓库文件失败");
                     result.Message = "读取密钥仓库文件失败";
                     return result;
                 }
+                refreshedKeys.TryGetValue(dlcAppId.ToString(), out dlcMainKey);
 
                 // 查找 DLC 自身主 AppID 的密钥
                 if (!string.IsNullOrEmpty(dlcMainKey))
