@@ -9,6 +9,7 @@ using iNKORE.UI.WPF.Modern.Controls.Helpers;
 using iNKORE.UI.WPF.Modern.Helpers.Styles;
 using Microsoft.Win32;
 using SteamLuaManager.Models;
+using SteamLuaManager.Services;
 using SteamLuaManager.ViewModels;
 
 namespace SteamLuaManager.Views;
@@ -416,18 +417,26 @@ public class TrainerBindingDialog : Window
 
     private async void ShowError(string message)
     {
-        var dialog = new ContentDialog
+        // async void 无调用方接异常，窗口关闭瞬间 ShowAsync 抛则直接崩进程，就地兜底
+        try
         {
-            Title = "输入有误",
-            Content = new TextBlock
+            var dialog = new ContentDialog
             {
-                Text = message,
-                TextWrapping = TextWrapping.Wrap,
-                MaxWidth = 360
-            },
-            CloseButtonText = "确定",
-            DefaultButton = ContentDialogButton.Close
-        };
-        await dialog.ShowAsync();
+                Title = "输入有误",
+                Content = new TextBlock
+                {
+                    Text = message,
+                    TextWrapping = TextWrapping.Wrap,
+                    MaxWidth = 360
+                },
+                CloseButtonText = "确定",
+                DefaultButton = ContentDialogButton.Close
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("修改器", $"错误提示框显示失败: {ex.Message}");
+        }
     }
 }

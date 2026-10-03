@@ -35,14 +35,4 @@ public partial class TrainerBinding : ObservableObject
     }
 
     public List<string> AutoKeys { get; set; } = new();
-
-    public TrainerBinding Clone() => new()
-    {
-        GameName = GameName,
-        GameExePath = GameExePath,
-        TrainerFilePath = TrainerFilePath,
-        TrainerDisplayName = TrainerDisplayName,
-        IsEnabled = IsEnabled,
-        AutoKeys = new List<string>(AutoKeys)
-    };
 }

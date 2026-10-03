@@ -111,7 +111,13 @@ public partial class AchievementEditViewModel : ObservableObject, IDisposable
 
     private async Task<bool> ReloadCoreAsync()
     {
-        if (_session == null) return false;
+        // 会话为空（子进程未启动或已退出）不再静默返回，给一行提示免得界面干等
+        if (_session == null)
+        {
+            StatusMessage = "Steam 会话不可用，可点击「重新加载」重试";
+            EmptyHintText = "Steam 会话不可用，可点击「重新加载」重试";
+            return false;
+        }
 
         IsBusy = true;
         StatusMessage = "";

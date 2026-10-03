@@ -194,7 +194,11 @@ public sealed class CloudOAuthService : IDisposable
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancel, timeout.Token);
         while (true)
         {
-            var ctx = await _listener!.GetContextAsync().WaitAsync(linked.Token);
+            // 重入的第二次授权会 Stop/Close 旧监听器，快照后判空按取消返回，不再串台抛 NRE
+            var listener = _listener;
+            if (listener == null || !listener.IsListening)
+                return null;
+            var ctx = await listener.GetContextAsync().WaitAsync(linked.Token);
             var query = ctx.Request.QueryString;
             string? code = query["code"];
             string? error = query["error"];

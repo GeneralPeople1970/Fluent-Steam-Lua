@@ -503,8 +503,20 @@ public partial class TrainerViewModel : ObservableObject, IDisposable
         {
             var procName = Path.GetFileNameWithoutExtension(MonitorExePath);
             // 只要进程里有SvcMonitor在运行，就视为已安装
-            if (Process.GetProcessesByName(procName).Any(p => !p.HasExited))
-                return true;
+            var procs = Process.GetProcessesByName(procName);
+            try
+            {
+                foreach (var p in procs)
+                {
+                    try { if (!p.HasExited) return true; }
+                    catch { }
+                }
+            }
+            finally
+            {
+                foreach (var p in procs)
+                    try { p.Dispose(); } catch { }
+            }
 
             // 没有运行则检查注册表（可能注册了但尚未启动）
             using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
@@ -520,10 +532,13 @@ public partial class TrainerViewModel : ObservableObject, IDisposable
         var name = Path.GetFileNameWithoutExtension(MonitorExePath);
         foreach (var p in Process.GetProcessesByName(name))
         {
-            if (!p.HasExited)
+            using (p)
             {
-                try { p.Kill(); p.WaitForExit(2000); }
-                catch { }
+                if (!p.HasExited)
+                {
+                    try { p.Kill(); p.WaitForExit(2000); }
+                    catch { }
+                }
             }
         }
     }
@@ -585,7 +600,7 @@ public partial class TrainerViewModel : ObservableObject, IDisposable
                 UseShellExecute = true,
                 WindowStyle = ProcessWindowStyle.Hidden,
                 CreateNoWindow = true
-            });
+            })?.Dispose();
 
             RefreshMonitorStatus();
         }
@@ -649,7 +664,7 @@ public partial class TrainerViewModel : ObservableObject, IDisposable
                 UseShellExecute = true,
                 WindowStyle = ProcessWindowStyle.Hidden,
                 CreateNoWindow = true
-            });
+            })?.Dispose();
 
             IsServiceInstalled = true;
             StatusMessage = "后台服务已安装并启动，开机自动运行";
@@ -741,9 +756,15 @@ public partial class TrainerViewModel : ObservableObject, IDisposable
     }
 
     [RelayCommand]
-    private void RemoveBinding(TrainerBinding? binding)
+    private async Task RemoveBinding(TrainerBinding? binding)
     {
         if (binding == null) return;
+        // 删绑定不可恢复，照删文件确认框同样前置确认
+        var confirmed = await _dialogService.ShowConfirmAsync(
+            "确认删除",
+            $"确定要删除绑定 \"{binding.GameName}\" 吗？",
+            "删除", "取消");
+        if (!confirmed) return;
         TrainerBindings.Remove(binding);
         SaveBindings();
         StatusMessage = $"已删除绑定: {binding.GameName}";
@@ -891,12 +912,17 @@ public partial class TrainerViewModel : ObservableObject, IDisposable
 
     private static string GetFileNameFromResponse(HttpResponseMessage response, string gameName)
     {
+        // 服务端文件名不可信：绝对路径会让 Path.Combine 丢弃下载目录，
+        // 目录穿越符会写到目录之外，统一展平为纯文件名
         var disposition = response.Content.Headers.ContentDisposition;
-        if (disposition?.FileName != null)
+        var raw = disposition?.FileNameStar;
+        if (string.IsNullOrWhiteSpace(raw))
+            raw = disposition?.FileName;
+        if (!string.IsNullOrWhiteSpace(raw))
         {
-            var name = disposition.FileName.Trim('"');
-            if (!string.IsNullOrWhiteSpace(name))
-                return name;
+            var flat = SanitizeFileName(Path.GetFileName(raw.Trim('"').Trim()));
+            if (!string.IsNullOrWhiteSpace(flat) && !IsReservedFileName(flat))
+                return flat;
         }
 
         var ext = response.Content.Headers.ContentType?.MediaType switch
@@ -909,6 +935,17 @@ public partial class TrainerViewModel : ObservableObject, IDisposable
         };
 
         return $"{SanitizeFileName(gameName)}-FLiNG{ext}";
+    }
+
+    private static bool IsReservedFileName(string fileName)
+    {
+        // Windows 保留设备名即使带扩展名也无法创建，命中则回退游戏名命名
+        var stem = Path.GetFileNameWithoutExtension(fileName).ToUpperInvariant();
+        return stem is "CON" or "PRN" or "AUX" or "NUL"
+            or "COM1" or "COM2" or "COM3" or "COM4" or "COM5"
+            or "COM6" or "COM7" or "COM8" or "COM9"
+            or "LPT1" or "LPT2" or "LPT3" or "LPT4" or "LPT5"
+            or "LPT6" or "LPT7" or "LPT8" or "LPT9";
     }
 
     [RelayCommand]

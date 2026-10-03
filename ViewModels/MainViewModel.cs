@@ -79,7 +79,7 @@ namespace SteamLuaManager.ViewModels;
 	private string _refreshProgressText = string.Empty;
 
 	[ObservableProperty]
-	private int _selectedCount;
+	private string _selectionSummary = string.Empty;
 
 	[ObservableProperty]
 	private bool _isSelectionMode;
@@ -122,15 +122,47 @@ namespace SteamLuaManager.ViewModels;
 	{
 		if (!value)
 		{
-			foreach (var game in Games)
-				game.IsSelected = false;
+			_batchSelecting = true;
+			try
+			{
+				foreach (var game in _filteredCache)
+					game.IsSelected = false;
+			}
+			finally { _batchSelecting = false; }
 			NotifySelectionChanged();
 		}
 	}
 
 	public void NotifySelectionChanged()
 	{
-		SelectedCount = Games.Count(g => g.IsSelected);
+		// 选中态挂在 GameInfo 上与 _filteredCache 同引用，计数按筛选全量而非当前页
+		var count = _filteredCache.Count(g => g.IsSelected);
+		SelectionSummary = $"已选择 {count}/{_filteredCache.Count}";
+	}
+
+	// 手动勾选 CheckBox 只改 GameInfo 不经过 VM，订阅选中变化实时刷新计数；
+	// 批量设置时屏蔽事件逐条触发（千级库 O(N²)），末尾手动 Notify 一次
+	private bool _batchSelecting;
+
+	private void ResubscribeSelectionTracking(List<GameInfo> oldGames, List<GameInfo> newGames)
+	{
+		if (!ReferenceEquals(oldGames, newGames))
+		{
+			foreach (var g in oldGames)
+				g.PropertyChanged -= OnGameIsSelectedChanged;
+		}
+		foreach (var g in newGames)
+		{
+			g.PropertyChanged -= OnGameIsSelectedChanged;
+			g.PropertyChanged += OnGameIsSelectedChanged;
+		}
+	}
+
+	private void OnGameIsSelectedChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+	{
+		if (_batchSelecting) return;
+		if (e.PropertyName == nameof(GameInfo.IsSelected))
+			NotifySelectionChanged();
 	}
 
 	[RelayCommand]
@@ -204,7 +236,8 @@ namespace SteamLuaManager.ViewModels;
 
 	private void OnRefreshRequested()
 	{
-		Application.Current.Dispatcher.Invoke(() => { _ = RefreshGamesAsync(); });
+		// fire-and-forget 不需要等 UI 执行完；同步 Invoke 在关闭期会堵池线程甚至抛，改异步投递
+		_ = Application.Current.Dispatcher.InvokeAsync(() => { _ = RefreshGamesAsync(); });
 	}
 
 	// 检测仅在启动时跑一次，横幅关闭后本次启动不再显示
@@ -253,7 +286,9 @@ namespace SteamLuaManager.ViewModels;
 		var scanOk = false;
 		try
 		{
+			var oldGames = _allGames;
 			_allGames = await _luaFileManager.ScanLuaFilesAsync();
+			ResubscribeSelectionTracking(oldGames, _allGames);
 			await Task.Run(() => _steamApiService.PopulateFromCache(_allGames));
 			await ApplyFilterAsync();
 			UpdateStatus();
@@ -266,11 +301,34 @@ namespace SteamLuaManager.ViewModels;
 		}
 
 		if (scanOk)
-			StartBackgroundFetch();
+			_ = StartBackgroundFetchAsync();
 	}
 
 	// 封面/名字后台获取：首屏已绘制，本方法立即返回；按 AppId 快照工作，
 	// 回填只写仍在列表中的对象，中途删游戏/新一轮刷新不会互相踩
+	private async Task StartBackgroundFetchAsync()
+	{
+		// 大库首次询问：筛选全量超阈值且没问过时让用户选自动还是手动，只打扰一次；
+		// 注意用 _filteredCache 而非 Games（Games 只是当前页，最多 20 个）
+		var settings = _settingsService.Load();
+		if (settings.AutoFetchCovers && !settings.CoverFetchAsked && _filteredCache.Count >= 500)
+		{
+			var auto = await ShowModernConfirmAsync(
+				"游戏较多",
+				$"检测到 {_filteredCache.Count} 个游戏，启动时自动获取全部封面可能较慢。\n\n选“自动获取”保持现状，选“仅手动”则关闭自动（卡片上的刷新按钮仍可手动获取，可在设置中改回）。",
+				"自动获取", "仅手动");
+			settings.CoverFetchAsked = true;
+			if (!auto)
+			{
+				settings.AutoFetchCovers = false;
+				StatusText = "已关闭封面自动获取（大库），可在设置中重新开启";
+				LogService.Info("主页", $"大库（{_filteredCache.Count}）用户选择手动获取封面");
+			}
+			_settingsService.Save(settings);
+		}
+		StartBackgroundFetch();
+	}
+
 	private void StartBackgroundFetch()
 	{
 		CancelFetch();
@@ -395,7 +453,9 @@ namespace SteamLuaManager.ViewModels;
 		try
 		{
 			var newGames = await _luaFileManager.ScanLuaFilesAsync();
+			var oldGames = _allGames;
 			_allGames = newGames;
+			ResubscribeSelectionTracking(oldGames, _allGames);
 			await Task.Run(() => _steamApiService.PopulateFromCache(_allGames));
 			await ApplyFilterAsync();
 			UpdateStatus();
@@ -408,7 +468,7 @@ namespace SteamLuaManager.ViewModels;
 		}
 
 		if (scanOk)
-			StartBackgroundFetch();
+			_ = StartBackgroundFetchAsync();
 	}
 
 	partial void OnSearchTextChanged(string value)
@@ -648,23 +708,34 @@ namespace SteamLuaManager.ViewModels;
 	[RelayCommand]
 	private void SelectAll()
 	{
-		foreach (var game in Games)
-			game.IsSelected = true;
+		// 全选=筛选结果全量，不只是当前页
+		_batchSelecting = true;
+		try
+		{
+			foreach (var game in _filteredCache)
+				game.IsSelected = true;
+		}
+		finally { _batchSelecting = false; }
 		NotifySelectionChanged();
 	}
 
 	[RelayCommand]
 	private void ClearSelection()
 	{
-		foreach (var game in Games)
-			game.IsSelected = false;
+		_batchSelecting = true;
+		try
+		{
+			foreach (var game in _filteredCache)
+				game.IsSelected = false;
+		}
+		finally { _batchSelecting = false; }
 		NotifySelectionChanged();
 	}
 
 	[RelayCommand]
 	private async Task BatchEnableAsync()
 	{
-		var selected = Games.Where(g => g.IsSelected && g.IsDisabled).ToList();
+		var selected = _filteredCache.Where(g => g.IsSelected && g.IsDisabled).ToList();
 		if (selected.Count == 0)
 		{
 			await ShowModernDialogAsync("批量启用", "没有选中的已禁用游戏。");
@@ -681,7 +752,7 @@ namespace SteamLuaManager.ViewModels;
 	[RelayCommand]
 	private async Task BatchDisableAsync()
 	{
-		var selected = Games.Where(g => g.IsSelected && !g.IsDisabled).ToList();
+		var selected = _filteredCache.Where(g => g.IsSelected && !g.IsDisabled).ToList();
 		if (selected.Count == 0)
 		{
 			await ShowModernDialogAsync("批量禁用", "没有选中的已启用游戏。");
@@ -698,7 +769,7 @@ namespace SteamLuaManager.ViewModels;
 	[RelayCommand]
 	private async Task BatchDeleteAsync()
 	{
-		var selected = Games.Where(g => g.IsSelected && !g.IsDisabled).ToList();
+		var selected = _filteredCache.Where(g => g.IsSelected && !g.IsDisabled).ToList();
 		if (selected.Count == 0)
 		{
 			await ShowModernDialogAsync("批量删除", "没有选中的已启用游戏。\n已禁用的游戏需先启用后再删除。");

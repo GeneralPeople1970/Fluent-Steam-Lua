@@ -205,9 +205,8 @@ public class CloudRedirectService : ICloudRedirectService
             }
             if (root["cloud_redirect"]?.GetValue<bool>() == enabled) return;
             root["cloud_redirect"] = enabled;
-            var tmp = pinPath + ".new";
-            File.WriteAllText(tmp, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-            File.Move(tmp, pinPath, overwrite: true);
+            CloudCredentialStore.AtomicWriteAllText(pinPath,
+                root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             LogService.Info("云存档", $"DLL 云开关已同步为{(enabled ? "开" : "关")}");
         }
         catch (Exception ex)
@@ -383,7 +382,7 @@ public class CloudRedirectService : ICloudRedirectService
 
         var dir = Path.GetDirectoryName(target);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-        var tmp = target + ".new";
+        var tmp = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
             File.WriteAllBytes(tmp, embedded);
@@ -399,6 +398,7 @@ public class CloudRedirectService : ICloudRedirectService
         finally
         {
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            try { if (File.Exists(target + ".new")) File.Delete(target + ".new"); } catch { }
         }
         LogService.Info("云存档", $"云存档 DLL 已部署到 {target}");
     }
@@ -435,9 +435,8 @@ public class CloudRedirectService : ICloudRedirectService
             root["sync_playtime"] = true;
             root["auto_update_dll"] = false;
 
-            var tmp = configPath + ".new";
-            File.WriteAllText(tmp, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-            File.Move(tmp, configPath, overwrite: true);
+            CloudCredentialStore.AtomicWriteAllText(configPath,
+                root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         }
         catch (Exception ex)
         {

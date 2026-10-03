@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 using System.IO;
 
@@ -139,7 +140,15 @@ public class ManifestMonitorService : IManifestMonitorService
                     }
                     continue;
                 }
-                var req = new ManifestRequest(int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value), m.Groups[3].Value);
+                // 控制台行理论上全是数字，但超长数字会让 Parse 抛异常拖停整个监控；
+                // 解析失败只跳过该行并记一行日志，不断链
+                if (!int.TryParse(m.Groups[1].Value, CultureInfo.InvariantCulture, out var depotId) ||
+                    !int.TryParse(m.Groups[2].Value, CultureInfo.InvariantCulture, out var manifestId))
+                {
+                    Emit($"忽略无法解析的清单请求行: {line.Trim()}");
+                    continue;
+                }
+                var req = new ManifestRequest(depotId, manifestId, m.Groups[3].Value);
                 bool isNew;
                 lock (_seenLock)
                 {

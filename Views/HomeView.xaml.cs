@@ -1,6 +1,7 @@
 ﻿using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media.Animation;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -24,6 +25,30 @@ public partial class HomeView : UserControl
     {
         InitializeComponent();
         PreviewMouseLeftButtonDown += HomeView_PreviewMouseLeftButtonDown;
+        DataContextChanged += (_, e) =>
+        {
+            if (e.OldValue is MainViewModel oldVm)
+                oldVm.PropertyChanged -= OnViewModelPropertyChanged;
+            if (e.NewValue is MainViewModel newVm)
+                newVm.PropertyChanged += OnViewModelPropertyChanged;
+        };
+    }
+
+    // 筛选/排序/搜索整体替换列表时，给当前可见视图播一次短淡入；
+    // 分页追加走 Add 不经过这里，不会打断滚动
+    private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(MainViewModel.Games)) return;
+        FrameworkElement? target = null;
+        if (CardScrollViewer.IsVisible) target = CardScrollViewer;
+        else if (ListScrollViewer.IsVisible) target = ListScrollViewer;
+        else if (TableScrollViewer.IsVisible) target = TableScrollViewer;
+        if (target == null) return;
+        target.Opacity = 0;
+        target.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150))
+        {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+        });
     }
 
     private void SearchBox_QuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs e)

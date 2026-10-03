@@ -83,7 +83,9 @@ public sealed class AuthorizationService : IAuthorizationService
             if (ticketMatch.Success)
             {
                 var name = ticketMatch.Groups[1].Value.ToLowerInvariant();
-                var declared = uint.Parse(ticketMatch.Groups[2].Value, CultureInfo.InvariantCulture);
+                if (!uint.TryParse(ticketMatch.Groups[2].Value, NumberStyles.None,
+                        CultureInfo.InvariantCulture, out var declared))
+                    return Fail($"{name} 声明字节数无效：{ticketMatch.Groups[2].Value}");
                 var hex = ticketMatch.Groups[3].Value;
                 if (hex.Length % 2 != 0)
                     return Fail($"{name} 十六进制长度必须为偶数");
@@ -108,6 +110,10 @@ public sealed class AuthorizationService : IAuthorizationService
                 return Fail($"tickets.txt 中 {name} 数据为 null（该授权不完整，无法导入）");
             }
 
+            // 无法识别的行：畸形票据行可能含大段 hex，只报行特征不贴原文，票据材料不落日志
+            var squashed = string.Concat(line.Where(c => Uri.IsHexDigit(c)));
+            if (squashed.Length >= 64)
+                return Fail("无法识别的行（含疑似票据数据，已隐去）：请检查 tickets.txt 格式");
             return Fail($"无法识别的行：{Truncate(line)}");
         }
 
@@ -140,14 +146,13 @@ public sealed class AuthorizationService : IAuthorizationService
         if (appIdOffset < 0)
         {
             LogMismatchForensics(appId, appTicketBytes);
-            return Fail($"appticket 内未找到声明 AppID {appId}（常规偏移 16 处为 " +
-                $"{BitConverter.ToUInt32(appTicketBytes, 16)}），该票据与当前游戏不对应，已停止导入。" +
+            return Fail($"appticket 内未找到声明 AppID {appId}（常规偏移 16 处不是该 AppID），" +
+                "该票据与当前游戏不对应，已停止导入。" +
                 "请用内置提取重新提取该游戏的票据；第三方加壳工具的票据布局不同，不支持导入。" +
                 "详情见 app.log（授权分类）。");
         }
         if (appIdOffset != 16)
-            Log("授权", $"appticket 内嵌 AppID 在非常规偏移 {appIdOffset} 处命中 " +
-                $"(偏移 16 处为 {BitConverter.ToUInt32(appTicketBytes, 16)})，已接受导入");
+            Log("授权", $"appticket 内嵌 AppID 在非常规偏移 {appIdOffset} 处命中，已接受导入");
 
         // AppTicket 内嵌 SteamID：偏移 8 处小端 uint64，必须非零
         var steamId = BitConverter.ToUInt64(appTicketBytes, 8);
@@ -199,18 +204,14 @@ public sealed class AuthorizationService : IAuthorizationService
         return -1;
     }
 
-    // 内嵌校验失败时记录取证信息：只记票据头部与各偏移 u32，不记完整票据，避免日志膨胀
+    // 内嵌校验失败时记录取证信息：只记长度与扫描结论，不记票据字节内容，
+    // 取证行会随日志附件外发，票据材料不得落盘到日志
     private static void LogMismatchForensics(uint appId, byte[] appTicketBytes)
     {
         try
         {
-            var headLen = Math.Min(appTicketBytes.Length, 48);
-            var headHex = Convert.ToHexString(appTicketBytes, 0, headLen);
-            var words = new List<string>();
-            for (var off = 0; off + 4 <= appTicketBytes.Length && off <= 24; off += 4)
-                words.Add($"[{off}]={BitConverter.ToUInt32(appTicketBytes, off)}");
             Log("授权", $"内嵌校验失败：声明 {appId}，票据 {appTicketBytes.Length}B，" +
-                $"头 {headLen}B={headHex}，u32 偏移值：{string.Join(" ", words)}");
+                "全票据 4 字节对齐扫描未命中声明 AppID");
         }
         catch { }
     }

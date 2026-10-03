@@ -110,9 +110,9 @@ public partial class ExtractionViewModel : ObservableObject, IDisposable
             return;
         }
 
-        if (!int.TryParse(id, out var appId))
+        if (!int.TryParse(id, out var appId) || appId <= 0)
         {
-            StatusMessage = "AppID 必须为数字";
+            StatusMessage = "AppID 必须为正整数";
             return;
         }
 
@@ -322,13 +322,20 @@ public partial class ExtractionViewModel : ObservableObject, IDisposable
                         var r = await _accountService.DownloadManifestAsync(line.ParentAppId, line.Id, gid, keyBytes, dumpDir, innerCt);
                         dlResults[i] = (line, r);
                     });
+                var dlOk = 0;
                 foreach (var item in dlResults)
                 {
                     if (item is not { } done) continue;
+                    if (done.R.Success && done.R.FilePath != null) dlOk++;
                     PostLog(done.R.Success && done.R.FilePath != null
                         ? $"已下载 Manifest：{Path.GetFileName(done.R.FilePath)}"
                         : $"Manifest 跳过 ({done.Line.Id})：{done.R.Message}");
                 }
+                // 全挂/部分挂必须在结论里明示，否则"提取完成"误导用户以为全成功
+                if (targets.Count > 0 && dlOk == 0)
+                    PostLog("Manifest 全部下载失败：密钥文件已生成可用，清单文件请稍后手动重试");
+                else if (dlOk < targets.Count)
+                    PostLog($"Manifest 部分下载失败（{dlOk}/{targets.Count}），失败项可稍后手动重试");
             }
 
             if (ExtractAchievements)

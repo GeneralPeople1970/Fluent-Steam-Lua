@@ -28,8 +28,9 @@ public sealed class CloudProviderStore
 
     private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(30) };
     private readonly Dictionary<string, HttpClient> _s3Clients = new(StringComparer.OrdinalIgnoreCase);
+    private readonly LinkedList<string> _s3ClientOrder = new();
+    private const int MaxS3Clients = 8;
     private readonly object _s3ClientLock = new();
-
     private const string RootFolderName = "CloudRedirect";
     private const string StatsFileName = "stats.json";
 
@@ -965,9 +966,24 @@ public sealed class CloudProviderStore
         var key = $"{ep.Scheme}://{ep.Host}|{allowInsecureTls}|{caCertPath}";
         lock (_s3ClientLock)
         {
-            if (_s3Clients.TryGetValue(key, out var cached)) return cached;
+            // 命中移到队尾；超限摘除最早并释放。淘汰撞上在飞请求会 abort 当次，
+            // 但只发生在换 endpoint/证书这种本来就中断的场景，可接受
+            if (_s3Clients.TryGetValue(key, out var cached))
+            {
+                _s3ClientOrder.Remove(key);
+                _s3ClientOrder.AddLast(key);
+                return cached;
+            }
             var client = BuildS3Client(ep, allowInsecureTls, caCertPath);
             _s3Clients[key] = client;
+            _s3ClientOrder.AddLast(key);
+            while (_s3Clients.Count > MaxS3Clients && _s3ClientOrder.First != null)
+            {
+                var oldest = _s3ClientOrder.First.Value;
+                _s3ClientOrder.RemoveFirst();
+                if (_s3Clients.Remove(oldest, out var evicted))
+                    try { evicted.Dispose(); } catch { }
+            }
             return client;
         }
     }

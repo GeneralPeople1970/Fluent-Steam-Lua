@@ -34,7 +34,7 @@ public class AppUpdateService : IAppUpdateService
     public static string ExeName => Path.GetFileName(Environment.ProcessPath ?? "SteamLuaManager.exe");
 
     // 散文件版安装目录旁必有主 dll；单文件版（新旧命名）都没有
-    public static bool IsLooseInstall() =>
+    private static bool IsLooseInstall() =>
         File.Exists(Path.Combine(InstallDir, "SteamLuaManager.dll"));
 
     public async Task<StagedAppUpdate> DownloadAndStageAsync(
@@ -224,7 +224,7 @@ public class AppUpdateService : IAppUpdateService
             psi.ArgumentList.Add(staged.ExeName);
             psi.ArgumentList.Add("--version");
             psi.ArgumentList.Add(staged.Version);
-            Process.Start(psi);
+            Process.Start(psi)?.Dispose();
             LogService.Info("更新", $"已启动更新程序，目标版本 {staged.Version}");
             return true;
         }

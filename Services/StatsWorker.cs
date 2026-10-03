@@ -16,7 +16,15 @@ public static class StatsWorker
         {
             if (args.Length >= 4 && args[1] == "serve")
             {
-                var appId = uint.Parse(args[2]);
+                if (!uint.TryParse(args[2], out var appId))
+                {
+                    File.WriteAllText(GetErrorPath(), JsonSerializer.Serialize(new WorkerSaveResult
+                    {
+                        Ok = false,
+                        Message = "worker 参数错误"
+                    }));
+                    return -1;
+                }
                 return RunServe(appId, args[3]);
             }
 

@@ -11,6 +11,7 @@ public partial class ManifestView : UserControl
     // 存量 Key 的占位符：只为让框看起来不是空的，保存时靠 _pwdDirty 区分用户是否真改过
     private const string FakePassword = "****************";
     private bool _pwdDirty;
+    private ManifestViewModel? _subscribedVm;
 
     public ManifestView()
     {
@@ -24,10 +25,21 @@ public partial class ManifestView : UserControl
                 _pwdDirty = false;
             }
             RefreshCopyLogButtonVisibility();
-            if (DataContext is ManifestViewModel logVm)
-                logVm.LogLines.CollectionChanged += (_, _) => RefreshCopyLogButtonVisibility();
+            // 切页每次都会进 Loaded；VM 是单例，先摘旧订阅否则 handler 越积越多
+            var logVm = DataContext as ManifestViewModel;
+            if (!ReferenceEquals(_subscribedVm, logVm))
+            {
+                if (_subscribedVm != null)
+                    _subscribedVm.LogLines.CollectionChanged -= OnLogLinesChanged;
+                _subscribedVm = logVm;
+                if (_subscribedVm != null)
+                    _subscribedVm.LogLines.CollectionChanged += OnLogLinesChanged;
+            }
         };
     }
+
+    private void OnLogLinesChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
+        => RefreshCopyLogButtonVisibility();
 
     // 复制日志按钮跟随设置开关与日志条数，和入库/提取界面保持一致
     private void RefreshCopyLogButtonVisibility()

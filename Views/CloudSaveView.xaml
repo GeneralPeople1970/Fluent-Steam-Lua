@@ -167,6 +167,9 @@
                             <TextBlock Grid.Row="5" Grid.Column="0" Text="Endpoint" VerticalAlignment="Center" FontSize="12" Margin="0,4"/>
                             <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding R2Endpoint, UpdateSourceTrigger=PropertyChanged}" Padding="8,6" Margin="0,4"/>
                         </Grid>
+                        <TextBlock Text="Endpoint 留空则用默认地址；Key Prefix 为云端目录前缀，两台机器填一致才能互通"
+                                   FontSize="12" Margin="0,4,0,0" TextWrapping="Wrap"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                         <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                             <Button Content="保存 R2 凭证并切换" Padding="20,6" Margin="0,0,8,0"
                                     Command="{Binding SaveR2Command}"/>
@@ -228,6 +231,9 @@
                                 <CheckBox Content="跳过 TLS 校验" IsChecked="{Binding S3AllowInsecureTls}"/>
                             </StackPanel>
                         </Grid>
+                        <TextBlock Text="Endpoint 填带 https:// 的完整地址；Region 按服务商要求填写（如 us-east-1）；Key Prefix 两台机器填一致才能互通；“携带签名载荷”仅部分老旧 S3 需要，默认不勾"
+                                   FontSize="12" Margin="0,4,0,0" TextWrapping="Wrap"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                         <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                             <Button Content="保存 S3 凭证并切换" Padding="20,6" Margin="0,0,8,0"
                                     Command="{Binding SaveS3Command}"/>

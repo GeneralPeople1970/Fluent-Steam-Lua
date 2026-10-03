@@ -9,7 +9,6 @@
     <converters:EqualityToVisibilityConverter x:Key="EqualityToVisibilityConverter"/>
     <converters:OAuthProviderVisibilityConverter x:Key="OAuthProviderVisibilityConverter"/>
     <converters:StringNotEmptyToVisibilityConverter x:Key="StringNotEmptyToVisibilityConverter"/>
-    <converters:FilePathToImageConverter x:Key="FilePathToImageConverter"/>
     <converters:BoolInvertConverter x:Key="BoolInvertConverter"/>
     <converters:BoolToRunStopConverter x:Key="BoolToRunStopConverter"/>
     <converters:BoolToDownloadTextConverter x:Key="BoolToDownloadTextConverter"/>

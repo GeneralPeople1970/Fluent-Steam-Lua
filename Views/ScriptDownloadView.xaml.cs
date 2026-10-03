@@ -13,6 +13,8 @@ namespace SteamLuaManager.Views;
 
 public partial class ScriptDownloadView : UserControl
 {
+    private ScriptDownloadViewModel? _subscribedVm;
+
     public ScriptDownloadView()
     {
         InitializeComponent();
@@ -23,17 +25,33 @@ public partial class ScriptDownloadView : UserControl
                 var settings = App.ServiceProvider?.GetService(typeof(ISettingsService)) is ISettingsService s
                     ? s.Load() : null;
                 var showInSetting = settings is { ShowCopyLogButton: true };
-                if (showInSetting && DataContext is ScriptDownloadViewModel vm)
+                var vm = DataContext as ScriptDownloadViewModel;
+                // 切页每次都会进 Loaded；VM 是单例，先摘旧订阅否则 handler 越积越多
+                if (!ReferenceEquals(_subscribedVm, vm))
                 {
-                    vm.LogLines.CollectionChanged += (_, _) =>
-                        CopyLogButton.Visibility = vm.LogLines.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-                    CopyLogButton.Visibility = vm.LogLines.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+                    if (_subscribedVm != null)
+                        _subscribedVm.LogLines.CollectionChanged -= OnLogLinesChanged;
+                    _subscribedVm = vm;
+                    if (_subscribedVm != null)
+                        _subscribedVm.LogLines.CollectionChanged += OnLogLinesChanged;
                 }
+                if (showInSetting && vm != null)
+                    CopyLogButton.Visibility = vm.LogLines.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
                 else
                     CopyLogButton.Visibility = Visibility.Collapsed;
             }
             catch { CopyLogButton.Visibility = Visibility.Collapsed; }
         };
+    }
+
+    private void OnLogLinesChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
+    {
+        if (_subscribedVm == null) return;
+        // 日志进来才冒出来是存量 bug：开关关闭时必须保持隐藏，不能只看条数
+        var show = App.ServiceProvider?.GetService(typeof(ISettingsService)) is ISettingsService s
+            && s.Load().ShowCopyLogButton;
+        CopyLogButton.Visibility = show && _subscribedVm.LogLines.Count > 0
+            ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void CopyLogButton_Click(object sender, RoutedEventArgs e)

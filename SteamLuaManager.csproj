@@ -76,14 +76,6 @@
     <RemoveDir Directories="$(ProjectDir)Resources\SvcMonitorPublish" />
   </Target>
 
-  <Target Name="BuildUpdaterForEmbed" BeforeTargets="BeforeBuild">
-    <Exec Command="dotnet publish $(ProjectDir)Updater\Updater.csproj -c $(Configuration) -o $(ProjectDir)Resources\UpdaterPublish" />
-    <ZipDirectory SourceDirectory="$(ProjectDir)Resources\UpdaterPublish"
-                  DestinationFile="$(ProjectDir)Resources\Updater.zip"
-                  Overwrite="true" />
-    <RemoveDir Directories="$(ProjectDir)Resources\UpdaterPublish" />
-  </Target>
-
   <!-- 构建时拉取官方 Release 成品并验签：纯内联任务，不依赖外部脚本与 C++ 工具链 -->
   <UsingTask TaskName="FetchCloudRedirectDll" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
     <ParameterGroup>

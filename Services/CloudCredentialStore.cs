@@ -1,36 +1,13 @@
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Text;
 
 namespace SteamLuaManager.Services;
 
 // 按上游 companion 与 DLL 的约定存取凭证文件：JSON 明文经 DPAPI（当前用户、无附加熵）
-// 加密后原子落盘；读到遗留明文（首字节 '{'）直接沿用。未复用 SecureTokenStorage，
-// 其强制附加 entropy，加解密结果与上游不互通，且改动会波及 Steam 登录链路。
+// 加密后原子落盘；读到遗留明文（首字节 '{'）直接沿用。加解密已收敛到 SecureTokenStorage
+// 的无熵口（同一语义，旧文件可直接读）；有熵口专供 Steam 登录链路，双方互不串用。
 internal static class CloudCredentialStore
 {
-    [StructLayout(LayoutKind.Sequential)]
-    private struct DataBlob
-    {
-        public int cbData;
-        public IntPtr pbData;
-    }
-
-    [DllImport("crypt32.dll", SetLastError = true)]
-    private static extern bool CryptProtectData(
-        ref DataBlob pDataIn, string? szDataDescr, IntPtr pOptionalEntropy,
-        IntPtr pvReserved, IntPtr pPromptStruct, int dwFlags, out DataBlob pDataOut);
-
-    [DllImport("crypt32.dll", SetLastError = true)]
-    private static extern bool CryptUnprotectData(
-        ref DataBlob pDataIn, IntPtr ppszDataDescr, IntPtr pOptionalEntropy,
-        IntPtr pvReserved, IntPtr pPromptStruct, int dwFlags, out DataBlob pDataOut);
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr LocalFree(IntPtr hMem);
-
-    private const int CRYPTPROTECT_UI_FORBIDDEN = 0x1;
-
     public static string? ReadJson(string path)
     {
         byte[] raw;
@@ -39,7 +16,12 @@ internal static class CloudCredentialStore
             if (!File.Exists(path)) return null;
             raw = File.ReadAllBytes(path);
         }
-        catch { return null; }
+        catch (Exception ex)
+        {
+            // 只记路径不记内容；文件不存在走正常 null 分支，不记（防刷屏）
+            LogService.Warn("云存档", $"凭证文件读取失败 {path}: {ex.Message}");
+            return null;
+        }
         if (raw.Length == 0) return null;
         if (raw[0] == (byte)'{')
             return Encoding.UTF8.GetString(raw);
@@ -48,7 +30,12 @@ internal static class CloudCredentialStore
             var plain = Unprotect(raw);
             return plain == null ? null : Encoding.UTF8.GetString(plain);
         }
-        catch { return null; }
+        catch (Exception ex)
+        {
+            // DPAPI 换机/换用户解不开从此有明确信号，凭此提示用户重登录
+            LogService.Warn("云存档", $"凭证文件解密失败 {path}（可能换了系统用户），需重新登录: {ex.Message}");
+            return null;
+        }
     }
 
     public static bool WriteJson(string path, string json)
@@ -59,61 +46,51 @@ internal static class CloudCredentialStore
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
             var blob = Protect(Encoding.UTF8.GetBytes(json));
             if (blob == null) return false;
-            var tmp = path + ".new";
-            File.WriteAllBytes(tmp, blob);
-            File.Move(tmp, path, overwrite: true);
+            AtomicWriteAllBytes(path, blob);
             return true;
         }
-        catch { return false; }
-    }
-
-    private static byte[]? Protect(byte[] data)
-    {
-        if (!OperatingSystem.IsWindows() || data.Length == 0) return null;
-        IntPtr pIn = IntPtr.Zero;
-        DataBlob outBlob = default;
-        try
+        catch (Exception ex)
         {
-            pIn = Marshal.AllocHGlobal(data.Length);
-            Marshal.Copy(data, 0, pIn, data.Length);
-            var inBlob = new DataBlob { cbData = data.Length, pbData = pIn };
-            if (!CryptProtectData(ref inBlob, null, IntPtr.Zero,
-                    IntPtr.Zero, IntPtr.Zero, CRYPTPROTECT_UI_FORBIDDEN, out outBlob))
-                return null;
-            var result = new byte[outBlob.cbData];
-            Marshal.Copy(outBlob.pbData, result, 0, outBlob.cbData);
-            return result;
-        }
-        catch { return null; }
-        finally
-        {
-            if (pIn != IntPtr.Zero) Marshal.FreeHGlobal(pIn);
-            if (outBlob.pbData != IntPtr.Zero) LocalFree(outBlob.pbData);
+            LogService.Warn("云存档", $"凭证文件写入失败 {path}: {ex.Message}");
+            return false;
         }
     }
 
-    private static byte[]? Unprotect(byte[] data)
+    // 原子落盘：固定 ".new" 临时名会被并发写互覆盖丢键，Guid 隔离；
+    // 顺手清理历史遗留的 ".new"（旧版本崩溃残留）
+    public static void AtomicWriteAllText(string path, string content)
     {
-        if (!OperatingSystem.IsWindows() || data.Length == 0) return null;
-        IntPtr pIn = IntPtr.Zero;
-        DataBlob outBlob = default;
+        var tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            pIn = Marshal.AllocHGlobal(data.Length);
-            Marshal.Copy(data, 0, pIn, data.Length);
-            var inBlob = new DataBlob { cbData = data.Length, pbData = pIn };
-            if (!CryptUnprotectData(ref inBlob, IntPtr.Zero, IntPtr.Zero,
-                    IntPtr.Zero, IntPtr.Zero, CRYPTPROTECT_UI_FORBIDDEN, out outBlob))
-                return null;
-            var result = new byte[outBlob.cbData];
-            Marshal.Copy(outBlob.pbData, result, 0, outBlob.cbData);
-            return result;
+            File.WriteAllText(tmp, content);
+            File.Move(tmp, path, overwrite: true);
         }
-        catch { return null; }
         finally
         {
-            if (pIn != IntPtr.Zero) Marshal.FreeHGlobal(pIn);
-            if (outBlob.pbData != IntPtr.Zero) LocalFree(outBlob.pbData);
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            try { if (File.Exists(path + ".new")) File.Delete(path + ".new"); } catch { }
         }
     }
+
+    public static void AtomicWriteAllBytes(string path, byte[] data)
+    {
+        var tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllBytes(tmp, data);
+            File.Move(tmp, path, overwrite: true);
+        }
+        finally
+        {
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            try { if (File.Exists(path + ".new")) File.Delete(path + ".new"); } catch { }
+        }
+    }
+
+    // 加解密收敛到 SecureTokenStorage 的无熵口：同一 DPAPI 语义，旧文件可直接读；
+    // 有熵口（Steam 登录链路）纹丝不动
+    private static byte[]? Protect(byte[] data) => SecureTokenStorage.ProtectBytesNoEntropy(data);
+
+    private static byte[]? Unprotect(byte[] data) => SecureTokenStorage.UnprotectBytesNoEntropy(data);
 }

@@ -94,10 +94,19 @@ public sealed class SteamAchievementService : ISteamAchievementService
 
             case ClientInitializeFailure.CreateSteamPipe:
             {
-                var steam = Process.GetProcessesByName("steam");
-                return steam.Length == 0
-                    ? "未检测到 Steam 客户端运行，请先启动并登录 Steam 后重试"
-                    : "Steam 客户端正在运行但连接失败，可能尚未启动完成，请稍后重试";
+                // 数组本身不可释放，逐个释放元素句柄
+                var procs = Process.GetProcessesByName("steam");
+                try
+                {
+                    return procs.Length == 0
+                        ? "未检测到 Steam 客户端运行，请先启动并登录 Steam 后重试"
+                        : "Steam 客户端正在运行但连接失败，可能尚未启动完成，请稍后重试";
+                }
+                finally
+                {
+                    foreach (var p in procs)
+                        try { p.Dispose(); } catch { }
+                }
             }
 
             case ClientInitializeFailure.ConnectToGlobalUser:

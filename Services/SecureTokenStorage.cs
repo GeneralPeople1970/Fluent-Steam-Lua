@@ -26,6 +26,18 @@ public static class SecureTokenStorage
         ref DataBlob pDataIn, IntPtr ppszDataDescr, ref DataBlob pOptionalEntropy,
         IntPtr pvReserved, IntPtr pPromptStruct, int dwFlags, out DataBlob pDataOut);
 
+    // 无附加熵的字节加解密：给云凭证用，必须与上游 companion/DLL 的文件格式互通；
+    // 有熵与无熵是两套 DPAPI 语义，不可混用，调用方各守各的口
+    [DllImport("crypt32.dll", EntryPoint = "CryptProtectData", SetLastError = true)]
+    private static extern bool CryptProtectDataNoEntropy(
+        ref DataBlob pDataIn, string? szDataDescr, IntPtr pOptionalEntropy,
+        IntPtr pvReserved, IntPtr pPromptStruct, int dwFlags, out DataBlob pDataOut);
+
+    [DllImport("crypt32.dll", EntryPoint = "CryptUnprotectData", SetLastError = true)]
+    private static extern bool CryptUnprotectDataNoEntropy(
+        ref DataBlob pDataIn, IntPtr ppszDataDescr, IntPtr pOptionalEntropy,
+        IntPtr pvReserved, IntPtr pPromptStruct, int dwFlags, out DataBlob pDataOut);
+
     [DllImport("kernel32.dll")]
     private static extern IntPtr LocalFree(IntPtr hMem);
 
@@ -98,6 +110,58 @@ public static class SecureTokenStorage
         {
             if (pIn != IntPtr.Zero) Marshal.FreeHGlobal(pIn);
             if (pEnt != IntPtr.Zero) Marshal.FreeHGlobal(pEnt);
+            if (outBlob.pbData != IntPtr.Zero) LocalFree(outBlob.pbData);
+        }
+    }
+
+    /// <summary>无熵字节加密：云凭证文件用，与上游格式互通。失败返回 null。</summary>
+    public static byte[]? ProtectBytesNoEntropy(byte[] data)
+    {
+        if (!OperatingSystem.IsWindows() || data.Length == 0) return null;
+        IntPtr pIn = IntPtr.Zero;
+        DataBlob outBlob = default;
+        try
+        {
+            pIn = Marshal.AllocHGlobal(data.Length);
+            Marshal.Copy(data, 0, pIn, data.Length);
+            var inBlob = new DataBlob { cbData = data.Length, pbData = pIn };
+            if (!CryptProtectDataNoEntropy(ref inBlob, null, IntPtr.Zero,
+                    IntPtr.Zero, IntPtr.Zero, CRYPTPROTECT_UI_FORBIDDEN, out outBlob))
+                return null;
+            var result = new byte[outBlob.cbData];
+            Marshal.Copy(outBlob.pbData, result, 0, outBlob.cbData);
+            return result;
+        }
+        catch { return null; }
+        finally
+        {
+            if (pIn != IntPtr.Zero) Marshal.FreeHGlobal(pIn);
+            if (outBlob.pbData != IntPtr.Zero) LocalFree(outBlob.pbData);
+        }
+    }
+
+    /// <summary>无熵字节解密：云凭证文件用。失败返回 null。</summary>
+    public static byte[]? UnprotectBytesNoEntropy(byte[] data)
+    {
+        if (!OperatingSystem.IsWindows() || data.Length == 0) return null;
+        IntPtr pIn = IntPtr.Zero;
+        DataBlob outBlob = default;
+        try
+        {
+            pIn = Marshal.AllocHGlobal(data.Length);
+            Marshal.Copy(data, 0, pIn, data.Length);
+            var inBlob = new DataBlob { cbData = data.Length, pbData = pIn };
+            if (!CryptUnprotectDataNoEntropy(ref inBlob, IntPtr.Zero, IntPtr.Zero,
+                    IntPtr.Zero, IntPtr.Zero, CRYPTPROTECT_UI_FORBIDDEN, out outBlob))
+                return null;
+            var result = new byte[outBlob.cbData];
+            Marshal.Copy(outBlob.pbData, result, 0, outBlob.cbData);
+            return result;
+        }
+        catch { return null; }
+        finally
+        {
+            if (pIn != IntPtr.Zero) Marshal.FreeHGlobal(pIn);
             if (outBlob.pbData != IntPtr.Zero) LocalFree(outBlob.pbData);
         }
     }

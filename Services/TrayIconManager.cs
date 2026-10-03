@@ -370,7 +370,8 @@ public sealed class TrayIconManager : IDisposable
     {
         try
         {
-            var exePath = Process.GetCurrentProcess().MainModule?.FileName;
+            using var cur = Process.GetCurrentProcess();
+            var exePath = cur.MainModule?.FileName;
             if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
                 return Icon.ExtractAssociatedIcon(exePath) ?? SystemIcons.Application;
         }

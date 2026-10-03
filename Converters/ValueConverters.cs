@@ -1,10 +1,6 @@
 ﻿using System.Globalization;
-using System.IO;
-using System.Linq;
 using System.Windows;
 using System.Windows.Data;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
 
 namespace SteamLuaManager.Converters;
 
@@ -183,59 +179,6 @@ public class BoolToDownloadIconConverter : IValueConverter
         if (value is bool downloaded && downloaded)
             return "\uE8A7";
         return "\uE896";
-    }
-
-    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
-    {
-        return Binding.DoNothing;
-    }
-}
-
-public class FilePathToImageConverter : IValueConverter
-{
-    private const int MaxCacheSize = 100;
-    private static readonly Dictionary<string, (DateTime LastWriteTimeUtc, BitmapImage Image)> ImageCache = new();
-    private static readonly object CacheLock = new();
-
-    public object? Convert(object value, Type targetType, object parameter, CultureInfo culture)
-    {
-        if (value is string path && !string.IsNullOrEmpty(path) && File.Exists(path))
-        {
-            try
-            {
-                var lastWriteTime = File.GetLastWriteTimeUtc(path);
-                lock (CacheLock)
-                {
-                    if (ImageCache.TryGetValue(path, out var cached) && cached.LastWriteTimeUtc == lastWriteTime)
-                        return cached.Image;
-                }
-
-                var bitmap = new BitmapImage();
-                bitmap.BeginInit();
-                bitmap.CacheOption = BitmapCacheOption.OnLoad;
-                using (var stream = new MemoryStream(File.ReadAllBytes(path)))
-                {
-                    bitmap.StreamSource = stream;
-                    bitmap.EndInit();
-                }
-                bitmap.Freeze();
-
-                lock (CacheLock)
-                {
-                    if (ImageCache.Count >= MaxCacheSize)
-                    {
-                        // 超限时清理最旧的一半
-                        var toRemove = ImageCache.Keys.Take(MaxCacheSize / 2).ToList();
-                        foreach (var key in toRemove)
-                            ImageCache.Remove(key);
-                    }
-                    ImageCache[path] = (lastWriteTime, bitmap);
-                }
-                return bitmap;
-            }
-            catch { }
-        }
-        return null;
     }
 
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)

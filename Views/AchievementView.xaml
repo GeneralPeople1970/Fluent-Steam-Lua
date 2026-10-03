@@ -204,8 +204,10 @@
             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,40,0,0"
                         Visibility="{Binding Games.Count, Converter={StaticResource ZeroToVisibilityConverter}}">
                 <ui:ProgressRing IsActive="{Binding IsLoadingGames}" Width="32" Height="32" Margin="0,0,0,12"/>
+                <!-- 加载中只转圈+状态，操作指引等加载完再显示，否则误导 -->
                 <TextBlock Text="双击游戏卡片，在独立窗口中编辑成就" FontSize="14" HorizontalAlignment="Center"
-                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           Visibility="{Binding IsLoadingGames, Converter={StaticResource InvertedBoolToVisibilityConverter}}"/>
                 <TextBlock Text="{Binding StatusMessage}" FontSize="12" Margin="0,6,0,0" HorizontalAlignment="Center"
                            Foreground="{DynamicResource TextFillColorTertiaryBrush}"/>
             </StackPanel>

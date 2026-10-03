@@ -6,25 +6,6 @@
     <DropShadowEffect x:Key="FloatingShadow" BlurRadius="16" ShadowDepth="4" Direction="270" Opacity="0.3"/>
     <DropShadowEffect x:Key="FabShadow" BlurRadius="12" ShadowDepth="3" Direction="270" Opacity="0.32"/>
 
-    <!-- 通用页面布局 -->
-    <Thickness x:Key="PageMargin">36,24,36,24</Thickness>
-
-    <!-- 页面标题 -->
-    <Style x:Key="PageTitleStyle" TargetType="TextBlock">
-        <Setter Property="FontSize" Value="28"/>
-        <Setter Property="FontWeight" Value="SemiBold"/>
-        <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}"/>
-    </Style>
-    <Style x:Key="PageSubtitleStyle" TargetType="TextBlock">
-        <Setter Property="FontSize" Value="13"/>
-        <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}"/>
-        <Setter Property="Margin" Value="0,4,0,0"/>
-    </Style>
-
-    <!-- 预置半透明填充（按需引用，暂未全量替换内联 Brush，避免主题切换回归） -->
-    <SolidColorBrush x:Key="CardBackgroundBrush" Color="{DynamicResource CardBackgroundFillColorDefault}" Opacity="0.45"/>
-    <SolidColorBrush x:Key="ControlFillBrush" Color="{DynamicResource ControlFillColorDefault}" Opacity="0.45"/>
-
     <!-- Home 卡片细节色：深色打底保证白色图标两主题可读 -->
     <SolidColorBrush x:Key="CardRefreshButtonFill" Color="#AA000000"/>
     <SolidColorBrush x:Key="CardDisabledOverlayFill" Color="#60000000"/>
@@ -71,20 +52,6 @@
         <Setter Property="HorizontalAlignment" Value="Center"/>
         <Setter Property="VerticalAlignment" Value="Center"/>
         <Setter Property="Margin" Value="0,32,0,32"/>
-    </Style>
-
-    <!-- 加载遮罩卡片样式（含阴影），供遮罩层引用 -->
-    <Style x:Key="OverlayCardShadowStyle" TargetType="Border">
-        <Setter Property="CornerRadius" Value="12"/>
-        <Setter Property="Padding" Value="32"/>
-        <Setter Property="BorderBrush" Value="{DynamicResource SurfaceStrokeColorDefaultBrush}"/>
-        <Setter Property="BorderThickness" Value="1"/>
-        <Setter Property="Background">
-            <Setter.Value>
-                <SolidColorBrush Color="{DynamicResource CardBackgroundFillColorDefault}" Opacity="0.45"/>
-            </Setter.Value>
-        </Setter>
-        <Setter Property="Effect" Value="{StaticResource FloatingShadow}"/>
     </Style>
 
 </ResourceDictionary>

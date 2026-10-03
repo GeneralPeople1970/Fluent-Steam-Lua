@@ -18,6 +18,12 @@ public partial class TrainerView : UserControl
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
+        // 切页每次都会进 Loaded，先摘后挂，否则同一处理跑 N 遍
+        SearchContentPanel.IsVisibleChanged -= OnContentPanelIsVisibleChanged;
+        DownloadContentPanel.IsVisibleChanged -= OnContentPanelIsVisibleChanged;
+        BindingContentPanel.IsVisibleChanged -= OnContentPanelIsVisibleChanged;
+        HotTrainersScrollViewer.PreviewMouseWheel -= OnNestedScrollViewerPreviewMouseWheel;
+        NewReleasesScrollViewer.PreviewMouseWheel -= OnNestedScrollViewerPreviewMouseWheel;
         SearchContentPanel.IsVisibleChanged += OnContentPanelIsVisibleChanged;
         DownloadContentPanel.IsVisibleChanged += OnContentPanelIsVisibleChanged;
         BindingContentPanel.IsVisibleChanged += OnContentPanelIsVisibleChanged;

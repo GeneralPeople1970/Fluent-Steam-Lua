@@ -191,6 +191,11 @@
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
+            <!-- 搜过但无结果：给明确空提示，而不是只剩空白 -->
+            <TextBlock Text="未找到匹配的游戏，换个关键词或直接用 AppID 搜索"
+                       FontSize="13" HorizontalAlignment="Center" Margin="0,24,0,0"
+                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                       Visibility="{Binding IsSearchEmptyVisible, Converter={StaticResource BoolToVisibilityConverter}}"/>
 
         </StackPanel>
     </controls:SmoothScrollViewer>

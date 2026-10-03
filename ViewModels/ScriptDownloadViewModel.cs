@@ -21,8 +21,10 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
     private readonly ISettingsService _settingsService;
     private readonly IHttpClientProvider _httpClientProvider;
     private readonly ISteamApiService _steamApiService;
+    private readonly IDialogService _dialogService;
     private string _currentDownloadMode = "DepotKey";
     private bool _disposed;
+    private CancellationTokenSource? _downloadCts;
 
     // 商店搜索的地区/语言组合（按优先级）：schinese 索引含中文本地化名称，english 兜底英文/外区
     private static readonly (string Cc, string Lang)[] StoreSearchLocales =
@@ -36,6 +38,12 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private bool _isDownloading;
+
+    [ObservableProperty]
+    private bool _hasSearched;
+
+    [ObservableProperty]
+    private bool _isSearchEmptyVisible;
 
     [ObservableProperty]
     private bool _isSearching;
@@ -73,18 +81,30 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
     public ObservableCollection<FoundGame> SearchResults { get; } = new();
     public ObservableCollection<string> LogLines { get; } = new();
 
-    public ScriptDownloadViewModel(ISteamPathService steamPathService, ISteamDepotService depotService, ISettingsService settingsService, IHttpClientProvider httpClientProvider, ISteamApiService steamApiService)
+    public ScriptDownloadViewModel(ISteamPathService steamPathService, ISteamDepotService depotService, ISettingsService settingsService, IHttpClientProvider httpClientProvider, ISteamApiService steamApiService, IDialogService dialogService)
     {
         _steamPathService = steamPathService;
         _depotService = depotService;
         _settingsService = settingsService;
         _httpClientProvider = httpClientProvider;
         _steamApiService = steamApiService;
+        _dialogService = dialogService;
         _currentDownloadMode = _settingsService.Load().DownloadMode;
         _settingsService.SettingsChanged += OnSettingsChanged;
         _depotService.AllSourcesUpdated += OnAllSourcesUpdated;
+        SearchResults.CollectionChanged += (_, _) => RefreshSearchEmptyVisible();
         OnPropertyChanged(nameof(LastUpdateTimeText));
     }
+
+    // 搜过但无结果才显示空提示；切页清空由 MainWindow 调 ResetSearchState 复位
+    public void ResetSearchState()
+    {
+        HasSearched = false;
+        RefreshSearchEmptyVisible();
+    }
+
+    private void RefreshSearchEmptyVisible()
+        => IsSearchEmptyVisible = HasSearched && SearchResults.Count == 0 && !IsSearching;
 
     private void OnSettingsChanged(AppSettings settings)
     {
@@ -106,6 +126,15 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         _disposed = true;
         _settingsService.SettingsChanged -= OnSettingsChanged;
         _depotService.AllSourcesUpdated -= OnAllSourcesUpdated;
+        try { _downloadCts?.Cancel(); } catch { }
+        _downloadCts?.Dispose();
+        _downloadCts = null;
+    }
+
+    // 切页离开时由 MainWindow 调用：在飞的入库任务取消，UI 已清空不再有幽灵进度
+    public void CancelDownload()
+    {
+        try { _downloadCts?.Cancel(); } catch { }
     }
 
     public record FoundGame(int AppId, string Name, string CoverUrl, List<string>? CoverCandidates = null, string ReleaseDate = "")
@@ -160,7 +189,20 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
 
         try
         {
-            if (int.TryParse(query, out int appId))
+            // 全链 AppId 都是 int，超 int.MaxValue 的输入无法入库，直接明示而非当游戏名搜
+            if (uint.TryParse(query, out var bigId) && bigId > int.MaxValue)
+            {
+                AddLog($"AppID {query} 超出支持范围（最大 {int.MaxValue}）");
+                StatusMessage = $"AppID 超出支持范围（最大 {int.MaxValue}）";
+                return;
+            }
+            if (int.TryParse(query, out var appId) && appId <= 0)
+            {
+                AddLog($"AppID 无效：{query}（必须为正整数）");
+                StatusMessage = "AppID 必须为正整数";
+                return;
+            }
+            if (appId > 0)
             {
                 // 小黑盒国内源优先（正常 0.3 秒返回）；miss 才进 appdetails，避免 Store 超时挡路
                 var (name, headerImage, releaseDate) = await XiaoHeiHeService.GetGameDetailAsync(appId, cts.Token);
@@ -216,6 +258,8 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         finally
         {
             IsSearching = false;
+            HasSearched = true;
+            RefreshSearchEmptyVisible();
         }
     }
 
@@ -373,8 +417,16 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         await ExecuteDownloadAsync(game.AppId.ToString());
     }
 
+    private Task<bool> ShowModernConfirmAsync(string title, string message, string primaryText = "确定", string closeText = "取消")
+        => _dialogService.ShowConfirmAsync(title, message, primaryText, closeText);
+
     private async Task ExecuteDownloadAsync(string gameId)
     {
+        // 新下载先取消旧的（IsDownloading 门控下旧任务理论上已结束，这里防幽灵任务）
+        CancelDownload();
+        var cts = new CancellationTokenSource();
+        _downloadCts = cts;
+        var ct = cts.Token;
         IsDownloading = true;
         LogLines.Clear();
         AddLog($"开始处理 ID：{gameId}");
@@ -383,10 +435,16 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
 
         try
         {
-            if (!int.TryParse(gameId, out int appId))
+            if (uint.TryParse(gameId, out var bigId) && bigId > int.MaxValue)
             {
-                AddLog("无效的游戏 ID");
-                StatusMessage = "无效的游戏 ID";
+                AddLog($"游戏 ID {gameId} 超出支持范围（最大 {int.MaxValue}）");
+                StatusMessage = $"游戏 ID 超出支持范围（最大 {int.MaxValue}）";
+                return;
+            }
+            if (!int.TryParse(gameId, out int appId) || appId <= 0)
+            {
+                AddLog("无效的游戏 ID（必须为正整数）");
+                StatusMessage = "无效的游戏 ID（必须为正整数）";
                 return;
             }
 
@@ -410,12 +468,32 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
 
             if (IsLocalCacheMode)
             {
-                await ExecuteDepotKeyDownloadAsync(appId);
+                // 本地生成目标固定：已存在则先确认，避免耗时查询后直接覆盖旧档
+                var targetLua = Path.Combine(luaFolder, $"{appId}.lua");
+                if (File.Exists(targetLua))
+                {
+                    var overwrite = await ShowModernConfirmAsync(
+                        "覆盖确认",
+                        $"已存在 {appId}.lua，继续会覆盖旧文件，确定重新入库吗？",
+                        "覆盖");
+                    if (!overwrite)
+                    {
+                        AddLog("已取消入库（保留现有 Lua 文件）");
+                        StatusMessage = "已取消入库";
+                        return;
+                    }
+                }
+                await ExecuteDepotKeyDownloadAsync(appId, ct);
             }
             else
             {
-                await ExecuteRemoteDownloadAsync(gameId, luaFolder);
+                await ExecuteRemoteDownloadAsync(gameId, luaFolder, ct);
             }
+        }
+        catch (OperationCanceledException)
+        {
+            AddLog("入库已取消");
+            StatusMessage = "已取消入库";
         }
         catch (Exception ex)
         {
@@ -425,6 +503,15 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         finally
         {
             IsDownloading = false;
+            if (ReferenceEquals(_downloadCts, cts))
+            {
+                _downloadCts?.Dispose();
+                _downloadCts = null;
+            }
+            else
+            {
+                cts.Dispose();
+            }
         }
     }
 
@@ -439,7 +526,7 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         };
     }
 
-    private async Task ExecuteDepotKeyDownloadAsync(int appId)
+    private async Task ExecuteDepotKeyDownloadAsync(int appId, CancellationToken ct)
     {
         _depotService.UseDataSource(_currentDownloadMode);
 
@@ -447,13 +534,22 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         DepotQueryResult? queryResult = null;
         try
         {
-            queryResult = await _depotService.QueryAppAsync(appId);
+            queryResult = await _depotService.QueryAppAsync(appId, ct);
         }
         catch (Exception ex)
         {
-            AddLog($"查询异常：{ex.InnerException?.Message ?? ex.Message}");
-            StatusMessage = "查询失败";
-            return;
+            // 内部默认已 30s/3 次，外层只补 1 次并明示，避免弱网一次抖动就判死
+            AddLog($"首次查询异常，正在重试（最后 1 次）：{ex.InnerException?.Message ?? ex.Message}");
+            try
+            {
+                queryResult = await _depotService.QueryAppAsync(appId, ct);
+            }
+            catch (Exception ex2)
+            {
+                AddLog($"查询异常：{ex2.InnerException?.Message ?? ex2.Message}");
+                StatusMessage = "查询失败";
+                return;
+            }
         }
 
         if (queryResult == null)
@@ -478,7 +574,7 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         }
 
         AddLog("下载密钥文件...");
-        var keyReady = await _depotService.EnsureKeyFilesAsync();
+        var keyReady = await _depotService.EnsureKeyFilesAsync(ct);
         if (!keyReady)
         {
             AddLog("下载密钥文件失败");
@@ -489,6 +585,7 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
 
         AddLog("正在生成 Lua 配置文件...");
         string? luaPath;
+        int includedDlc = -1;
         try
         {
             if (IncludeDlc && queryResult.DlcAppIds.Count > 0)
@@ -499,12 +596,13 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
                     if (p.Done == p.Total || p.Done % 5 == 0)
                         AddLog($"正在获取 DLC 信息 ({p.Done}/{p.Total})...");
                 });
-                luaPath = await _depotService.GenerateLuaWithDlcAsync(appId, pinManifest: PinManifest, dlcProgress: dlcProgress, fetchNames: FetchNameComments);
+                luaPath = await _depotService.GenerateLuaWithDlcAsync(appId, ct, pinManifest: PinManifest, dlcProgress: dlcProgress, fetchNames: FetchNameComments);
                 if (!string.IsNullOrEmpty(luaPath) && File.Exists(luaPath))
                 {
                     var content = await File.ReadAllTextAsync(luaPath);
                     var included = queryResult.DlcAppIds.Count(id =>
                         Regex.IsMatch(content, $@"\badd(?:app|token)id\(\s*{id}\s*[,\)]", RegexOptions.IgnoreCase));
+                    includedDlc = included;
                     AddLog($"包含 DLC 共 {included}/{queryResult.DlcAppIds.Count} 个");
                     if (included < queryResult.DlcAppIds.Count)
                         AddLog($"其中 {queryResult.DlcAppIds.Count - included} 个 DLC 因本地密钥仓库无对应 depots 密钥暂未收录");
@@ -518,7 +616,7 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
             {
                 if (!IncludeDlc && queryResult.DlcAppIds.Count > 0)
                     AddLog($"已跳过 {queryResult.DlcAppIds.Count} 个 DLC（未勾选 DLC入库）");
-                luaPath = await _depotService.GenerateLuaAsync(appId, pinManifest: PinManifest, fetchNames: FetchNameComments);
+                luaPath = await _depotService.GenerateLuaAsync(appId, ct, pinManifest: PinManifest, fetchNames: FetchNameComments);
             }
         }
         catch (InvalidOperationException ex)
@@ -537,13 +635,15 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
 
         AddLog($"Lua 配置文件已保存：{luaPath}");
         AddLog($"入库成功！Lua 文件：{Path.GetFileName(luaPath)}");
-        StatusMessage = $"入库成功：{queryResult.AppName}";
+        StatusMessage = includedDlc >= 0 && includedDlc < queryResult.DlcAppIds.Count
+            ? $"入库成功：{queryResult.AppName}（DLC {includedDlc}/{queryResult.DlcAppIds.Count}，部分缺密钥）"
+            : $"入库成功：{queryResult.AppName}";
     }
 
-    private async Task ExecuteRemoteDownloadAsync(string gameId, string luaFolder)
+    private async Task ExecuteRemoteDownloadAsync(string gameId, string luaFolder, CancellationToken ct)
     {
         AddLog("获取下载地址...");
-        var shortCode = await GetShortCodeAsync(gameId);
+        var shortCode = await GetShortCodeAsync(gameId, ct);
         if (string.IsNullOrEmpty(shortCode))
         {
             AddLog("获取短码失败");
@@ -553,19 +653,28 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         AddLog($"获取短码：{shortCode}");
 
         AddLog("开始下载文件...");
-        var zipPath = Path.Combine(Path.GetTempPath(), $"{gameId}.zip");
-        var success = await DownloadFileAsync(shortCode, zipPath);
-        if (!success)
+        // 固定名 zip 会被并发/残留互覆盖，Guid 隔离；finally 必删
+        var zipPath = Path.Combine(Path.GetTempPath(), $"steam_lua_{gameId}_{Guid.NewGuid():N}.zip");
+        var luaCount = 0;
+        try
         {
-            AddLog("下载失败");
-            StatusMessage = "下载失败";
-            return;
-        }
-        AddLog("文件下载完成");
+            var success = await DownloadFileAsync(shortCode, zipPath, ct);
+            if (!success)
+            {
+                AddLog("下载失败");
+                StatusMessage = "下载失败";
+                return;
+            }
+            AddLog("文件下载完成");
 
-        AddLog("正在解压...");
-        var luaCount = ExtractLuaFiles(zipPath, luaFolder);
-        AddLog("清理临时压缩包");
+            AddLog("正在解压...");
+            luaCount = ExtractLuaFiles(zipPath, luaFolder);
+            AddLog("清理临时压缩包");
+        }
+        finally
+        {
+            try { if (File.Exists(zipPath)) File.Delete(zipPath); } catch { }
+        }
 
         if (luaCount > 0)
         {
@@ -579,7 +688,7 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         }
     }
 
-    private async Task<string?> GetShortCodeAsync(string gameId)
+    private async Task<string?> GetShortCodeAsync(string gameId, CancellationToken ct)
     {
         var targetUrl = $"https://steamgames554.s3.us-east-1.amazonaws.com/{gameId}.zip";
         var payload = new Dictionary<string, string> { { "url", targetUrl } };
@@ -616,10 +725,10 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
                 AddLog($"响应内容前 500 字符：{json[..Math.Min(json.Length, 500)]}");
                 return null;
             }
-        }, "获取短码");
+        }, "获取短码", ct);
     }
 
-    private async Task<bool> DownloadFileAsync(string shortCode, string savePath)
+    private async Task<bool> DownloadFileAsync(string shortCode, string savePath, CancellationToken ct)
     {
         var proxyUrl = $"https://short.walftech.com/proxy.php?short={shortCode}";
         return await RetryAsync(async () =>
@@ -650,17 +759,25 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
             await contentStream.CopyToAsync(fileStream);
             fileStream.Flush(true);
             return true;
-        }, "下载文件");
+        }, "下载文件", ct);
     }
 
-    private async Task<T> RetryAsync<T>(Func<Task<T>> action, string stepName, int maxRetries = 3)
+    // 只管退避等待与 attempt 间检查：在飞请求仍靠原有 60s/15s 超时，不动代理 helper；
+    // 取消异常必须直接透出，否则取消会变成重试
+    private async Task<T> RetryAsync<T>(Func<Task<T>> action, string stepName, CancellationToken ct, int maxRetries = 3)
     {
         Exception? lastException = null;
         for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
+            ct.ThrowIfCancellationRequested();
             try
             {
                 return await action();
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // 只有用户取消才透出；在飞请求自身超时（TaskCanceledException）走下面重试
+                throw;
             }
             catch (Exception ex)
             {
@@ -670,7 +787,7 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
 
                 var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt));
                 AddLog($"{stepName}失败（第{attempt}次）：{ex.GetType().Name}: {ex.Message}，{delay.TotalSeconds}s后重试...");
-                await Task.Delay(delay);
+                await Task.Delay(delay, ct);
             }
         }
         AddLog($"{stepName}失败，已重试{maxRetries}次");

@@ -1,4 +1,5 @@
 ﻿using System.Collections.ObjectModel;
+using System.Globalization;
 using System.IO;
 using System.Text.RegularExpressions;
 using SteamLuaManager.Models;
@@ -11,6 +12,7 @@ public class LuaFileManager : ILuaFileManager, IDisposable
     private FileSystemWatcher? _watcher;
     private bool _isWatching;
     private CancellationTokenSource? _debounceCts;
+    private readonly object _debounceLock = new();
 
     private static readonly Regex AddAppIdRegex = new(@"addappid\((\d+)\)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex AddDepotRegex = new(@"addappid\((\d+),\s*(\d+),\s*""([^""]+)""\)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -170,7 +172,9 @@ public class LuaFileManager : ILuaFileManager, IDisposable
         var depotMatches = AddDepotRegex.Matches(content);
         foreach (Match match in depotMatches)
         {
-            var depotId = int.Parse(match.Groups[1].Value);
+            // 恶意或损坏文件的超长数字会让 Parse 抛异常拖垮整批扫描，坏条目只跳过自己
+            if (!int.TryParse(match.Groups[1].Value, CultureInfo.InvariantCulture, out var depotId))
+                continue;
             var key = match.Groups[3].Value;
             game.Depots.Add(new DepotInfo { DepotId = depotId, Key = key });
         }
@@ -180,7 +184,8 @@ public class LuaFileManager : ILuaFileManager, IDisposable
         var activeMatches = ManifestPinRegex.Matches(content);
         foreach (Match match in activeMatches)
         {
-            var depotId = int.Parse(match.Groups[1].Value);
+            if (!int.TryParse(match.Groups[1].Value, CultureInfo.InvariantCulture, out var depotId))
+                continue;
             activePins[depotId] = match.Groups[2].Value;
         }
 
@@ -189,7 +194,8 @@ public class LuaFileManager : ILuaFileManager, IDisposable
         var commentedMatches = ManifestPinCommentedRegex.Matches(content);
         foreach (Match match in commentedMatches)
         {
-            var depotId = int.Parse(match.Groups[1].Value);
+            if (!int.TryParse(match.Groups[1].Value, CultureInfo.InvariantCulture, out var depotId))
+                continue;
             commentedPins[depotId] = match.Groups[2].Value;
         }
 
@@ -283,12 +289,12 @@ public class LuaFileManager : ILuaFileManager, IDisposable
             var active = ManifestPinRegex.Match(lines[i]);
             var commented = ManifestPinCommentedRegex.Match(lines[i]);
 
-            if (active.Success && int.Parse(active.Groups[1].Value) == depotId)
+            if (active.Success && int.TryParse(active.Groups[1].Value, CultureInfo.InvariantCulture, out var activeId) && activeId == depotId)
             {
                 lines[i] = newLine;
                 return;
             }
-            if (commented.Success && int.Parse(commented.Groups[1].Value) == depotId)
+            if (commented.Success && int.TryParse(commented.Groups[1].Value, CultureInfo.InvariantCulture, out var commentedId) && commentedId == depotId)
             {
                 lines[i] = newLine;
                 return;
@@ -409,8 +415,8 @@ public class LuaFileManager : ILuaFileManager, IDisposable
 
         await Task.Run(() =>
         {
-            if (File.Exists(destPath)) File.Delete(destPath);
-            File.Move(srcPath, destPath);
+            // 同盘一步覆盖移动：先删后移中间崩溃会丢档
+            File.Move(srcPath, destPath, true);
         });
     }
 
@@ -427,8 +433,8 @@ public class LuaFileManager : ILuaFileManager, IDisposable
 
         await Task.Run(() =>
         {
-            if (File.Exists(destPath)) File.Delete(destPath);
-            File.Move(srcPath, destPath);
+            // 同盘一步覆盖移动：先删后移中间崩溃会丢档
+            File.Move(srcPath, destPath, true);
         });
     }
 
@@ -464,10 +470,15 @@ public class LuaFileManager : ILuaFileManager, IDisposable
 
     private void OnFilesChanged(object sender, FileSystemEventArgs e)
     {
-        _debounceCts?.Cancel();
-        _debounceCts?.Dispose();
-        _debounceCts = new CancellationTokenSource();
-        var token = _debounceCts.Token;
+        CancellationToken token;
+        lock (_debounceLock)
+        {
+            // 文件监听回调跑在池线程，burst 导入时并发进这里；
+            // 旧 CTS 只 Cancel 不 Dispose：已释放 CTS 的 Token 会抛 ODE，而下面只抓 OCE
+            try { _debounceCts?.Cancel(); } catch { }
+            _debounceCts = new CancellationTokenSource();
+            token = _debounceCts.Token;
+        }
 
         _ = Task.Run(async () =>
         {
@@ -484,8 +495,12 @@ public class LuaFileManager : ILuaFileManager, IDisposable
     public void Dispose()
     {
         StopWatching();
-        _debounceCts?.Cancel();
-        _debounceCts?.Dispose();
+        lock (_debounceLock)
+        {
+            try { _debounceCts?.Cancel(); } catch { }
+            _debounceCts?.Dispose();
+            _debounceCts = null;
+        }
         GC.SuppressFinalize(this);
     }
 }

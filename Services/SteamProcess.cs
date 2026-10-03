@@ -12,7 +12,16 @@ public static class SteamProcess
     {
         try
         {
-            return Process.GetProcessesByName("steam").Length > 0;
+            var procs = Process.GetProcessesByName("steam");
+            try
+            {
+                return procs.Length > 0;
+            }
+            finally
+            {
+                foreach (var p in procs)
+                    try { p.Dispose(); } catch { }
+            }
         }
         catch
         {
@@ -26,8 +35,11 @@ public static class SteamProcess
         {
             foreach (var proc in Process.GetProcessesByName("steam"))
             {
-                if (proc.Id != 0)
-                    proc.Kill();
+                using (proc)
+                {
+                    if (proc.Id != 0)
+                        proc.Kill();
+                }
             }
         }
         catch { }
@@ -49,7 +61,7 @@ public static class SteamProcess
             {
                 FileName = exePath,
                 UseShellExecute = true
-            });
+            })?.Dispose();
             return new SteamLaunchResult(true, string.Empty, string.Empty);
         }
         catch (Exception ex)

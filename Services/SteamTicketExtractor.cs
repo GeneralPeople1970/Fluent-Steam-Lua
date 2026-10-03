@@ -64,7 +64,8 @@ public sealed class SteamTicketExtractor
 
             await process.WaitForExitAsync(ct).WaitAsync(WorkerTimeout, ct);
             var exitCode = process.ExitCode;
-            process = null; // 正常退出，无需清理
+            process.Dispose();
+            process = null; // 正常退出，已释放句柄
 
             LogService.Info("提取",
                 $"提取子进程退出码 {exitCode}，结果文件存在={File.Exists(resultFile)}：{resultFile}");
@@ -126,6 +127,7 @@ public sealed class SteamTicketExtractor
             {
                 try { process.Kill(); } catch { }
             }
+            process?.Dispose();
             try { File.Delete(resultFile); } catch { }
         }
     }
@@ -134,7 +136,16 @@ public sealed class SteamTicketExtractor
     {
         try
         {
-            return Process.GetProcessesByName("steam").Length > 0;
+            var procs = Process.GetProcessesByName("steam");
+            try
+            {
+                return procs.Length > 0;
+            }
+            finally
+            {
+                foreach (var p in procs)
+                    try { p.Dispose(); } catch { }
+            }
         }
         catch
         {

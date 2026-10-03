@@ -32,7 +32,7 @@ public class SteamApiService : ISteamApiService
 	{
 		_settingsService = settingsService;
 		_httpClientProvider = httpClientProvider;
-		_selectedCdnIndex = _settingsService.Load().SelectedCdnIndex;
+		_selectedCdnIndex = Math.Clamp(_settingsService.Load().SelectedCdnIndex, 0, CdnEndpoint.Defaults.Count - 1);
 
 		_cacheDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "cache");
 		_coversDir = Path.Combine(_cacheDir, "covers");
@@ -44,7 +44,8 @@ public class SteamApiService : ISteamApiService
 
 	public void UpdateCdnPreference(int selectedIndex)
 	{
-		_selectedCdnIndex = selectedIndex;
+		// 旧配置的下标可能超出当前节点表，入口钳制（使用处虽有边界检查，脏值仍会存回去污染配置）
+		_selectedCdnIndex = Math.Clamp(selectedIndex, 0, CdnEndpoint.Defaults.Count - 1);
 		_selectedCdnFailCount = 0;
 	}
 

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -131,6 +132,18 @@ public sealed class DialogService : IDialogService
                         FontSize = 12,
                         Foreground = secondary
                     });
+                    var openBackupButton = new Button
+                    {
+                        Content = "打开备份目录",
+                        Margin = new Thickness(0, 6, 0, 0),
+                        HorizontalAlignment = HorizontalAlignment.Left
+                    };
+                    openBackupButton.Click += (_, _) =>
+                    {
+                        try { Process.Start(new ProcessStartInfo { FileName = backupDir, UseShellExecute = true })?.Dispose(); }
+                        catch { }
+                    };
+                    panel.Children.Add(openBackupButton);
 
                     return new ContentDialog
                     {
@@ -178,4 +191,43 @@ public sealed class DialogService : IDialogService
             CloseButtonText = "确定",
             DefaultButton = ContentDialogButton.Close
         }, "显示提示对话框");
+
+    // 云启用三合一：备份确认 + 启用 + 重启选项一次问完；
+    // 主按钮与备份勾选联动，不勾不让点，免得用户没备份就启用
+    public async Task<(bool Confirmed, bool RestartNow)> ShowEnableCloudConfirmAsync()
+    {
+        ContentDialog? dialog = null;
+        var backupBox = new CheckBox { Content = "我已备份重要存档", Margin = new Thickness(0, 12, 0, 0) };
+        // 默认不勾：重启会杀 Steam，用户可能正挂着游戏，重启选项必须显式选
+        var restartBox = new CheckBox { Content = "启用后立即重启 Steam（使云存档生效）", Margin = new Thickness(0, 6, 0, 0) };
+        backupBox.Checked += (_, _) => { if (dialog != null) dialog.IsPrimaryButtonEnabled = true; };
+        backupBox.Unchecked += (_, _) => { if (dialog != null) dialog.IsPrimaryButtonEnabled = false; };
+        var panel = new StackPanel { MaxWidth = 440 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "云存档会接管 Lua 游戏的存档读写，首次启用前请先备份重要存档。启用后需重启 Steam 才能生效。",
+            TextWrapping = TextWrapping.Wrap
+        });
+        panel.Children.Add(backupBox);
+        panel.Children.Add(restartBox);
+        dialog = new ContentDialog
+        {
+            Title = "启用云存档",
+            Content = panel,
+            PrimaryButtonText = "启用",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+            IsPrimaryButtonEnabled = false
+        };
+        try
+        {
+            var result = await await Application.Current.Dispatcher.InvokeAsync(() => dialog.ShowAsync());
+            return (result == ContentDialogResult.Primary, restartBox.IsChecked == true);
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("对话框", $"显示启用确认对话框失败: {ex.Message}");
+            return (false, false);
+        }
+    }
 }

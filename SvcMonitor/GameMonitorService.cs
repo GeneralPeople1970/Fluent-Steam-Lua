@@ -164,7 +164,7 @@ public class GameMonitorService : BackgroundService
         foreach (var binding in enabled)
         {
             tracked.Add(binding.TrainerFilePath);
-            var gameProc = FindGameProcess(binding.GameExePath);
+            using var gameProc = FindGameProcess(binding.GameExePath);
 
             if (gameProc != null && !_activeTrainers.ContainsKey(binding.TrainerFilePath))
                 LaunchTrainer(binding);
@@ -176,6 +176,7 @@ public class GameMonitorService : BackgroundService
                     catch { }
                 }
                 _activeTrainers.Remove(binding.TrainerFilePath);
+                try { proc.Dispose(); } catch { }
             }
         }
 
@@ -190,6 +191,7 @@ public class GameMonitorService : BackgroundService
                     catch { }
                 }
                 _activeTrainers.Remove(key);
+                try { p.Dispose(); } catch { }
             }
         }
     }
@@ -205,8 +207,17 @@ public class GameMonitorService : BackgroundService
             }
 
             var procName = Path.GetFileNameWithoutExtension(binding.TrainerFilePath);
-            var existing = Process.GetProcessesByName(procName)
-                .FirstOrDefault(p => !p.HasExited);
+            Process? existing = null;
+            foreach (var p in Process.GetProcessesByName(procName))
+            {
+                bool alive;
+                try { alive = !p.HasExited; }
+                catch { alive = false; }
+                if (alive && existing == null)
+                    existing = p;
+                else
+                    try { p.Dispose(); } catch { }
+            }
             if (existing != null)
             {
                 _activeTrainers[binding.TrainerFilePath] = existing;
@@ -318,12 +329,18 @@ public class GameMonitorService : BackgroundService
         try
         {
             var name = Path.GetFileNameWithoutExtension(exePath);
-            return Process.GetProcessesByName(name)
-                .FirstOrDefault(p =>
-                {
-                    try { return p.MainModule?.FileName?.Equals(exePath, StringComparison.OrdinalIgnoreCase) == true; }
-                    catch { return false; }
-                });
+            Process? match = null;
+            foreach (var p in Process.GetProcessesByName(name))
+            {
+                bool hit;
+                try { hit = p.MainModule?.FileName?.Equals(exePath, StringComparison.OrdinalIgnoreCase) == true; }
+                catch { hit = false; }
+                if (hit && match == null)
+                    match = p;
+                else
+                    try { p.Dispose(); } catch { }
+            }
+            return match;
         }
         catch { return null; }
     }
@@ -332,10 +349,13 @@ public class GameMonitorService : BackgroundService
     {
         foreach (var proc in _activeTrainers.Values)
         {
-            if (!proc.HasExited)
+            using (proc)
             {
-                try { proc.Kill(); proc.WaitForExit(2000); }
-                catch { }
+                if (!proc.HasExited)
+                {
+                    try { proc.Kill(); proc.WaitForExit(2000); }
+                    catch { }
+                }
             }
         }
         _activeTrainers.Clear();

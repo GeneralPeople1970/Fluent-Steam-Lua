@@ -243,6 +243,8 @@ public partial class MainWindow : Window
         DisposeIfNeeded(_trainerViewModel);
         DisposeIfNeeded(_achievementViewModel);
         DisposeIfNeeded(_authorizationViewModel);
+        DisposeIfNeeded(_manifestViewModel);
+        DisposeIfNeeded(_cloudSaveViewModel);
     }
 
     private static void DisposeIfNeeded(object obj)
@@ -571,8 +573,11 @@ public partial class MainWindow : Window
 
         if (tag != "ScriptDownload")
         {
+            // 先取消在飞的入库任务再清 UI，否则后台继续跑但进度无处显示
+            _scriptDownloadViewModel.CancelDownload();
             _scriptDownloadViewModel.LogLines.Clear();
             _scriptDownloadViewModel.SearchResults.Clear();
+            _scriptDownloadViewModel.ResetSearchState();
             _scriptDownloadViewModel.StatusMessage = "";
         }
         if (tag != "Extraction")

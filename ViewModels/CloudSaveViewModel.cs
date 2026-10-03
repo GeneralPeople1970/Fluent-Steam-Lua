@@ -402,22 +402,38 @@ public partial class CloudSaveViewModel : ObservableObject
                 var settings = _settingsService.Load();
                 if (!settings.CloudBackupConfirmed)
                 {
-                    var confirmed = await _dialogService.ShowConfirmAsync(
-                        "启用前确认",
-                        "云存档会接管 Lua 游戏的存档读写，首次启用前请先备份重要存档。\n\n确认已备份并启用吗？",
-                        "已备份，启用", "取消");
+                    // 三合一：备份确认 + 启用 + 重启选项一次问完，不勾备份不让启用；
+                    // 确认标记只在启用成功后落盘，启用失败下次重问
+                    var (confirmed, restartNow) = await _dialogService.ShowEnableCloudConfirmAsync();
                     if (!confirmed)
                     {
                         RevertToggle(false);
                         return;
                     }
+                    var progress = new Progress<string>(msg => SetListStatus(msg));
+                    await _cloudService.EnableAsync(null, progress);
                     settings.CloudBackupConfirmed = true;
                     _settingsService.Save(settings);
+                    if (restartNow)
+                    {
+                        var result = SteamProcess.RestartSteam(_steamPathService);
+                        if (!result.Ok)
+                        {
+                            SetListStatus(result.Message);
+                            LogService.Warn("云存档", $"重启 Steam 失败: {result.Message}");
+                        }
+                    }
+                    else
+                    {
+                        SetListStatus("云存档已启用，重启 Steam 后生效");
+                    }
                 }
-
-                var progress = new Progress<string>(msg => SetListStatus(msg));
-                await _cloudService.EnableAsync(null, progress);
-                await PromptRestartSteamAsync("云存档已启用");
+                else
+                {
+                    var progress = new Progress<string>(msg => SetListStatus(msg));
+                    await _cloudService.EnableAsync(null, progress);
+                    await PromptRestartSteamAsync("云存档已启用");
+                }
             }
             else
             {
@@ -560,16 +576,22 @@ public partial class CloudSaveViewModel : ObservableObject
         // 切源即切名单：中断进行中的刷新，以新源为准重拉
         _ = RefreshAfterProviderSwitchAsync();
         // DLL 启动时读配置，切源必须重启 Steam 才生效；连点切换只弹一次
-        _ = PromptRestartAfterSwitchAsync("云端提供商已切换");
+        _pendingRestartProviderName = value;
+        _ = PromptRestartAfterSwitchAsync();
     }
 
     private bool _restartPromptShowing;
+    private string _pendingRestartProviderName = string.Empty;
 
-    private async Task PromptRestartAfterSwitchAsync(string doneMessage)
+    private async Task PromptRestartAfterSwitchAsync()
     {
         if (_restartPromptShowing) return;
         _restartPromptShowing = true;
-        try { await PromptRestartSteamAsync(doneMessage); }
+        try
+        {
+            // 连点切换只弹一次，弹窗时用最后一次切换的源名，避免新旧对不上
+            await PromptRestartSteamAsync($"云端提供商已切换为{ProviderDisplayName(_pendingRestartProviderName)}");
+        }
         finally { _restartPromptShowing = false; }
     }
 
@@ -579,6 +601,12 @@ public partial class CloudSaveViewModel : ObservableObject
         _refreshCts?.Cancel();
         for (var i = 0; i < 50 && IsBusy; i++)
             await Task.Delay(100);
+        if (IsBusy)
+        {
+            SetListStatus("切换排队中：上一次刷新尚未结束，可稍后手动刷新");
+            LogService.Warn("云存档", "切源后等待刷新让路超时（5 秒），已放弃自动刷新");
+            return;
+        }
         await RefreshAsync();
     }
 
@@ -790,6 +818,20 @@ public partial class CloudSaveViewModel : ObservableObject
             IsListHintVisible = true;
             return;
         }
+        // 未登录直接指引去登录，不发 60 秒请求干等
+        var signedIn = provider switch
+        {
+            "gdrive" or "onedrive" => _cloudService.CheckOAuthToken(provider).Ok,
+            "r2" => _cloudService.LoadR2Credentials() != null,
+            "s3" => _cloudService.LoadS3Credentials() != null,
+            _ => false,
+        };
+        if (!signedIn)
+        {
+            ListStatusText = $"尚未登录{ProviderDisplayName(provider)}，请先在上方登录后再测试连接";
+            IsListHintVisible = true;
+            return;
+        }
         var display = ProviderDisplayName(provider);
         var root = _cloudService.GetEffectiveRemoteRoot();
         try
@@ -809,8 +851,10 @@ public partial class CloudSaveViewModel : ObservableObject
                 return;
             }
             var detail = r.AccountCount == 0
-                ? "认证通过，但该前缀下无数据。请核对 key_prefix/目录名，或 DLL 尚未同步过。"
-                : $"账号 {r.AccountCount} 个，首个账号下游戏 {r.AppCount} 个";
+                ? "认证通过，但该前缀下没有任何账号目录：空号或 key_prefix/目录名不对，请核对后再试。"
+                : r.AppCount == 0
+                    ? $"找到账号 {r.AccountCount} 个，但首个账号下没有游戏存档：DLL 尚未同步过，进游戏存一次档后再试。"
+                    : $"账号 {r.AccountCount} 个，首个账号下游戏 {r.AppCount} 个";
             LogService.Info("云存档", $"连接测试通过：{provider} {detail}");
             RestoreIdleListHint();
             await _dialogService.ShowAlertAsync("连接测试通过",
@@ -878,6 +922,17 @@ public partial class CloudSaveViewModel : ObservableObject
     private async Task SaveR2Async()
     {
         if (IsBusy) return;
+        // 必填先验：缺谁报谁，免得裸调服务端吃英文错
+        var missingR2 = new List<string>();
+        if (string.IsNullOrWhiteSpace(R2AccountId)) missingR2.Add("账户 ID");
+        if (string.IsNullOrWhiteSpace(R2AccessKeyId)) missingR2.Add("Access Key");
+        if (string.IsNullOrWhiteSpace(R2SecretKey)) missingR2.Add("Secret Key");
+        if (string.IsNullOrWhiteSpace(R2Bucket)) missingR2.Add("Bucket");
+        if (missingR2.Count > 0)
+        {
+            SetListStatus($"请填写：{string.Join("、", missingR2)}");
+            return;
+        }
         try
         {
             IsBusy = true;
@@ -902,9 +957,34 @@ public partial class CloudSaveViewModel : ObservableObject
     private async Task SaveS3Async()
     {
         if (IsBusy) return;
+        var missingS3 = new List<string>();
+        if (string.IsNullOrWhiteSpace(S3AccessKeyId)) missingS3.Add("Access Key");
+        if (string.IsNullOrWhiteSpace(S3SecretKey)) missingS3.Add("Secret Key");
+        if (string.IsNullOrWhiteSpace(S3Bucket)) missingS3.Add("Bucket");
+        if (string.IsNullOrWhiteSpace(S3Endpoint)) missingS3.Add("Endpoint");
+        if (string.IsNullOrWhiteSpace(S3Region)) missingS3.Add("Region");
+        if (missingS3.Count > 0)
+        {
+            SetListStatus($"请填写：{string.Join("、", missingS3)}");
+            return;
+        }
         try
         {
             IsBusy = true;
+            // 明文 HTTP 或跳过 TLS 校验会让密钥在传输中可被截获，保存前必须让用户知情确认
+            if (S3AllowInsecureHttp || S3AllowInsecureTls)
+            {
+                var ok = await _dialogService.ShowConfirmAsync("安全警告",
+                    "你勾选了不安全的连接选项（明文 HTTP / 跳过证书校验），" +
+                    "同一网络下的攻击者可以直接截获你的访问密钥并完全控制该存储桶。\n\n" +
+                    "仅在内网自建存储等可信环境下继续，确定保存吗？",
+                    "仍要保存", "取消");
+                if (!ok)
+                {
+                    SetListStatus("已取消保存 S3 凭证");
+                    return;
+                }
+            }
             var path = await Task.Run(() => _cloudService.SaveS3Credentials(new S3Credentials(
                 S3AccessKeyId.Trim(), S3SecretKey, S3Bucket.Trim(),
                 S3Endpoint.Trim(), S3Region.Trim(), S3KeyPrefix.Trim(),
