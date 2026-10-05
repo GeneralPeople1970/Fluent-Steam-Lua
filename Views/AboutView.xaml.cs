@@ -29,6 +29,8 @@ public partial class AboutView : UserControl
 
     public string VersionText { get; }
 
+    private FaqWindow? _faqWindow;
+
     public AboutView()
     {
         var version = Assembly.GetExecutingAssembly().GetName().Version;
@@ -37,6 +39,29 @@ public partial class AboutView : UserControl
             : "版本 1.0.0";
         InitializeComponent();
         DataContext = this;
+        // 注意：切页时预创建的 View 会触发 Unloaded，不能在这里关 FAQ 窗，
+        // 否则开着对照操作一切页就被关掉；窗口 Owner 已设，主窗口退出时会自动联带关闭
+    }
+
+    // 常见问题独立窗口：非模态，可开着对照操作；已打开则提到前面，不叠窗口
+    private void Faq_Click(object sender, RoutedEventArgs e)
+    {
+        if (_faqWindow != null)
+        {
+            try
+            {
+                if (_faqWindow.IsVisible)
+                {
+                    _faqWindow.Activate();
+                    return;
+                }
+            }
+            catch { }
+            _faqWindow = null;
+        }
+        _faqWindow = new FaqWindow { Owner = Window.GetWindow(this) };
+        _faqWindow.Closed += (_, _) => _faqWindow = null;
+        _faqWindow.Show();
     }
 
     private void GitHub_Click(object sender, RoutedEventArgs e)
