@@ -9,7 +9,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
-    <AssemblyName>SteamLuaManager</AssemblyName>
+    <AssemblyName Condition="'$(AppExeName)' != ''">$(AppExeName)</AssemblyName>
+    <AssemblyName Condition="'$(AppExeName)' == ''">SteamLuaManager</AssemblyName>
     <RootNamespace>SteamLuaManager</RootNamespace>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <Title>Fluent Steam Lua 管理工具</Title>
@@ -28,6 +29,7 @@
     <PackageReference Include="iNKORE.UI.WPF" Version="1.2.8" />
     <PackageReference Include="iNKORE.UI.WPF.Modern" Version="0.10.2.1" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
+    <PackageReference Include="Serilog" Version="4.4.0" />
     <PackageReference Include="SharpCompress" Version="0.50.4" />
     <PackageReference Include="SteamKit2" Version="3.4.0" />
     <PackageReference Include="Tomlyn" Version="2.10.1" />
@@ -52,6 +54,9 @@
     <Compile Remove="Updater\**\*" />
     <EmbeddedResource Remove="Updater\**\*" />
     <None Remove="Updater\**\*" />
+    <Compile Remove="CrackTool\**\*" />
+    <EmbeddedResource Remove="CrackTool\**\*" />
+    <None Remove="CrackTool\**\*" />
   </ItemGroup>
 
   <ItemGroup>
@@ -60,6 +65,22 @@
     <EmbeddedResource Include="Resources\CloudRedirectDll.zip" />
     <Compile Include="obj\Generated\FeedbackSecrets.g.cs" />
   </ItemGroup>
+
+  <!-- 免启动破解：进程内引用 SteamAutoCrack.Core（已改 net8/x64，随主程序编译） -->
+  <ItemGroup>
+    <!-- 改名只走 AppExeName（本工程消费）：NuGet restore 把 AssemblyName 当项目名，
+         直接全局传 -p:AssemblyName 会让主工程与 Core 同名而报 Ambiguous project name -->
+    <ProjectReference Include="CrackTool\SteamAutoCrack.Core\SteamAutoCrack.Core.csproj" />
+  </ItemGroup>
+
+  <!-- 单文件发布时把发布内容（含 CrackTool 的 SteamAPICheckBypass 劫持 DLL）一并打进 exe，
+       对外只有一个文件；内容运行时释放到 %TEMP%\.net，程序数据目录仍在 exe 旁不受影响 -->
+  <PropertyGroup>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <!-- 原生劫持 DLL 由 Core 工程自带 None 规则跟随输出（SteamAPICheckBypass\ 子目录，
+       正是 Core 按 NATIVE_DLL_SEARCH_DIRECTORIES 查找的位置），无需额外拷贝 -->
 
   <!-- 内嵌更新器与源码同步：每次构建自动重新打包，避免改了 Updater 源码却发出去旧版 -->
   <Target Name="BuildUpdaterForEmbed" BeforeTargets="BeforeBuild">

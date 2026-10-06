@@ -569,6 +569,7 @@ public partial class App : Application
         services.AddSingleton<IManifestMonitorService, ManifestMonitorService>();
         services.AddSingleton<IManifestHubKeyService, ManifestHubKeyService>();
         services.AddSingleton<IOnlineFixService, OnlineFixService>();
+        services.AddSingleton<ICrackToolService, CrackToolService>();
 
         services.AddTransient<MainViewModel>();
         services.AddTransient<SettingsViewModel>();
@@ -579,6 +580,7 @@ public partial class App : Application
         services.AddTransient<AuthorizationViewModel>();
         services.AddTransient<CloudSaveViewModel>();
         services.AddTransient<OnlineFixViewModel>();
+        services.AddTransient<CrackToolViewModel>();
         services.AddTransient<ManifestViewModel>();
         services.AddTransient<MainWindow>();
     }

@@ -26,7 +26,7 @@ jobs:
         run: dotnet publish SteamLuaManager.csproj -c Release -r win-x64 --self-contained false -p:DebugType=none -o publish/loose
 
       - name: Publish single-file version
-        run: dotnet publish SteamLuaManager.csproj -c Release -r win-x64 --self-contained false -p:DebugType=none -p:AssemblyName="Fluent Steam Lua" -p:PublishSingleFile=true -o publish/single
+        run: dotnet publish SteamLuaManager.csproj -c Release -r win-x64 --self-contained false -p:DebugType=none -p:AppExeName="Fluent Steam Lua" -p:PublishSingleFile=true -o publish/single
 
       - name: Upload loose-file artifact
         uses: actions/upload-artifact@v5

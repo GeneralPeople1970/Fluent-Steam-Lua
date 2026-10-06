@@ -11,3 +11,9 @@
 - 来源：<https://github.com/adamhathcock/sharpcompress>（NuGet 包引用 0.50.4，按需更新）
 - 许可证：MIT License，完整文本见上游仓库 LICENSE 文件
 - 用途：压缩包导入的 7z/rar 解压（zip/tar 走系统内置库）
+
+## Steam-auto-crack（免启动功能）
+
+- 来源：<https://github.com/SteamAutoCracks/Steam-auto-crack>（`CrackTool/` 内 vendor 源码：Core＋Steamless.API＋7 个解包器，已改目标 net8.0-windows/x64 跟随主程序编译；ValveKeyValue 依赖以自研 KV1 解析替代）
+- 许可证：MIT License，Copyright 归上游作者所有，完整文本见上游仓库 LICENSE.md 文件
+- 用途：SteamStub 脱壳＋Goldberg 模拟器部署（仅支持 SteamStub 游戏，Denuvo 无效）；其 GUI/CLI 项目未使用

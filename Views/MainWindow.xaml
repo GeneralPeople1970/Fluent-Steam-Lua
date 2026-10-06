@@ -91,6 +91,11 @@
                         <ui:FontIcon Glyph="&#xE774;" FontSize="16"/>
                     </ui:NavigationViewItem.Icon>
                 </ui:NavigationViewItem>
+                <ui:NavigationViewItem x:Name="CrackToolItem" Content="免启动" Tag="CrackTool" Padding="12,0">
+                    <ui:NavigationViewItem.Icon>
+                        <ui:FontIcon Glyph="&#xE768;" FontSize="16"/>
+                    </ui:NavigationViewItem.Icon>
+                </ui:NavigationViewItem>
             </ui:NavigationView.MenuItems>
 
             <ui:NavigationView.FooterMenuItems>

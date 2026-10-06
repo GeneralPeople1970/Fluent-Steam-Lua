@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <OutputType>Library</OutputType>
+    <RootNamespace>Steamless.API</RootNamespace>
+    <AssemblyName>Steamless.API</AssemblyName>
+    <Description>Steamless API Library</Description>
+    <Platforms>x86</Platforms>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
+    <OutputPath>..\Steamless\bin\x86\Debug\Plugins\</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
+    <OutputPath>..\Steamless\bin\x86\Release\Plugins\</OutputPath>
+  </PropertyGroup>
+</Project>

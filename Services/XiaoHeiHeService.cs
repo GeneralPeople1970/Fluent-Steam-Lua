@@ -6,7 +6,7 @@ namespace SteamLuaManager.Services;
 // 小黑盒国内搜索源：入库前置的名字搜索与 appid 精确补位优先走这里，
 // 搜不到再降级到现有国外链路。未公开接口，解析按缺字段即跳过处理。
 // 来源标注只写 app.log（LogService），不进窗口日志。
-public sealed record HeiHeGame(int AppId, string Name, string CoverUrl, List<string> CoverCandidates, string ReleaseDate = "");
+public sealed record HeiHeGame(int AppId, string Name, string CoverUrl, List<string> CoverCandidates, string ReleaseDate = "", string Type = "");
 
 public static class XiaoHeiHeService
 {
@@ -67,7 +67,7 @@ public static class XiaoHeiHeService
                 if (string.IsNullOrWhiteSpace(release))
                     release = g.TryGetProperty("release_date_desc", out var rdd) && rdd.ValueKind == JsonValueKind.String
                         ? rdd.GetString() ?? "" : "";
-                scored.Add((new HeiHeGame(appId, name, covers[0], covers, release.Trim()),
+                scored.Add((new HeiHeGame(appId, name, covers[0], covers, release.Trim(), type),
                     Norm(name).Contains(normKeyword, StringComparison.Ordinal),
                     type == "game", follow));
             }
