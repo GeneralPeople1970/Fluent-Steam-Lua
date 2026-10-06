@@ -38,6 +38,7 @@
 - 支持固定游戏清单版本到最新版本或当前已安装版本
 - 支持游戏的Denuvo授权信息提取和使用授权（appticket和eticket）
 - 支持清单监听自动获取 manifest 来修补下载无网络的问题
+- 支持480联机和OnlineFix联机补丁一键搜索下载
 
 #### 修改器
 - 搜索游戏的修改器并下载管理（风灵月影修改器）
@@ -64,6 +65,13 @@
 - 展示并管理已重定向的游戏，支持一键打开路径和清空存档（游戏恢复最初状态）
 - 支持删除存档：先完整备份并验数，通过后才删，备份手动拷回恢复
 
+#### 免Steam启动游戏
+- 一键去除 SteamStub 并部署 Goldberg 模拟器，游戏免 Steam 启动且可正常弹成就完成体验
+- 支持还原破解；模拟器支持下载/更新（下载源跟随接口设置的镜像偏好，直连/镜像自动切换）
+- 内置 AppID 查询：用游戏目录名搜索候选并回填
+- Steam Web API Key 选填：填了可补全模拟器的成就与库存信息，不填则跳过，不影响破解本身
+- 注意：仅 SteamStub 游戏有效，使用 Denuvo 加密的游戏无效
+
 #### 特性
 - 文件变更自动监控并刷新缓存
 - 基于 Fluent Design 的现代化界面，使用WPF编译，方便调试
@@ -85,7 +93,7 @@
 发布为单文件可执行程序：
 
 ```cmd
-dotnet publish SteamLuaManager.csproj -c Release -r win-x64 --self-contained false -p:DebugType=none -p:AssemblyName="Fluent Steam Lua" -p:PublishSingleFile=true -o publish/single
+dotnet publish SteamLuaManager.csproj -c Release -r win-x64 --self-contained false -p:DebugType=none -p:AppExeName="Fluent Steam Lua" -p:PublishSingleFile=true -o publish/single
 ```
 
 发布为散文件可执行程序：
