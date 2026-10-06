@@ -133,7 +133,7 @@
                             </TextBox>
                             <TextBlock FontSize="12" TextWrapping="Wrap"
                                        Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                       Text="限制：同一时间只能运行一个此类游戏；仅支持大厅匹配类游戏。联机时好友看到的是你的真实游戏名。"/>
+                                       Text="限制：同一时间只能运行一个此类游戏；仅支持大厅匹配类游戏，且联机双方需都使用480联机方式进行游戏。"/>
                         </StackPanel>
                     </Border>
                 </StackPanel>
