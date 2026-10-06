@@ -359,6 +359,12 @@ public class SteamDepotService : ISteamDepotService
 
             return result;
         }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // HttpClient 超时和用户取消是同一异常家族：调用方没取消就是超时，给出明确接口指向
+            throw new TimeoutException(
+                $"请求仓库接口超时（{timeoutSeconds} 秒无响应）：api.steamcmd.net 连接超时，请检查网络或开启代理后重试");
+        }
         catch (Exception ex)
         {
             throw new InvalidOperationException($"查询 AppID {appId} 失败：{ex.Message}", ex);

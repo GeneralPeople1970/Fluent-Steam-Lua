@@ -536,20 +536,43 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         {
             queryResult = await _depotService.QueryAppAsync(appId, ct);
         }
-        catch (Exception ex)
+        catch (TimeoutException ex)
         {
-            // 内部默认已 30s/3 次，外层只补 1 次并明示，避免弱网一次抖动就判死
-            AddLog($"首次查询异常，正在重试（最后 1 次）：{ex.InnerException?.Message ?? ex.Message}");
+            // 只有超时才补一次：用户取消走下面的 OCE 分支直接停，不再浪费一次查询
+            AddLog($"首次查询超时，正在重试（最后 1 次）：{ex.Message}");
             try
             {
                 queryResult = await _depotService.QueryAppAsync(appId, ct);
             }
+            catch (TimeoutException ex2)
+            {
+                AddLog($"查询失败：{ex2.Message}");
+                StatusMessage = "查询失败，接口超时";
+                return;
+            }
+            catch (OperationCanceledException)
+            {
+                // 重试中用户取消：外层 ExecuteDownloadAsync 会报"入库已取消"，这里直接透出
+                throw;
+            }
             catch (Exception ex2)
             {
-                AddLog($"查询异常：{ex2.InnerException?.Message ?? ex2.Message}");
+                AddLog($"查询失败：{ex2.InnerException?.Message ?? ex2.Message}");
                 StatusMessage = "查询失败";
                 return;
             }
+        }
+        catch (OperationCanceledException)
+        {
+            AddLog("查询已取消");
+            StatusMessage = "已取消查询";
+            return;
+        }
+        catch (Exception ex)
+        {
+            AddLog($"查询异常：{ex.InnerException?.Message ?? ex.Message}");
+            StatusMessage = "查询失败";
+            return;
         }
 
         if (queryResult == null)
