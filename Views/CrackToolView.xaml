@@ -34,13 +34,31 @@
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <ui:AutoSuggestBox Grid.Column="0" Text="{Binding InputPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                 PlaceholderText="选择要脱壳的游戏根目录路径" Padding="8,6" Margin="0,0,8,0" Height="36"
-                                 FontSize="14" VerticalContentAlignment="Center" HorizontalAlignment="Stretch">
-                            <ui:AutoSuggestBox.Background>
-                                <SolidColorBrush Color="{DynamicResource ControlFillColorDefault}" Opacity="0.45"/>
-                            </ui:AutoSuggestBox.Background>
-                        </ui:AutoSuggestBox>
+                        <Grid Grid.Column="0" Margin="0,0,8,0" Height="36">
+                            <TextBox x:Name="PathBox" Text="{Binding InputPath, Mode=OneWay}"
+                                     IsReadOnly="True" Padding="8,6"
+                                     FontSize="14" VerticalContentAlignment="Center" HorizontalAlignment="Stretch"
+                                     ToolTip="通过右侧“选择目录”来指定你要脱壳破解的游戏根目录">
+                                <TextBox.Background>
+                                    <SolidColorBrush Color="{DynamicResource ControlFillColorDefault}" Opacity="0.45"/>
+                                </TextBox.Background>
+                            </TextBox>
+                            <TextBlock Text="选择要脱壳的游戏根目录路径" FontSize="14"
+                                       VerticalAlignment="Center" Margin="10,0,0,0"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       IsHitTestVisible="False">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Text, ElementName=PathBox}" Value="">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </Grid>
                         <Button Grid.Column="1" Command="{Binding BrowseFolderCommand}"
                                 Padding="16,6" Height="36" FontSize="14" Margin="8,0,0,0"
                                 Content="选择目录"/>
@@ -48,28 +66,37 @@
                                 Padding="16,6" Height="36" FontSize="14" Margin="8,0,0,0"
                                 Content="清除日志"/>
                     </Grid>
-                    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                        <TextBlock Text="AppID（必填）： " FontSize="13" VerticalAlignment="Center"
+                    <Grid Margin="0,12,0,0" VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="140"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*" MinWidth="80"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="AppID（必填）： " FontSize="13" VerticalAlignment="Center"
                                    Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
-                        <TextBox Text="{Binding AppId, UpdateSourceTrigger=PropertyChanged}"
+                        <TextBox Grid.Column="1" Text="{Binding AppId, UpdateSourceTrigger=PropertyChanged}"
                                  Padding="8,6" Height="32" FontSize="13" Width="140"
-                                 VerticalContentAlignment="Center"/>
-                        <Button Command="{Binding QueryAppIdCommand}"
+                                 VerticalContentAlignment="Center"
+                                 ToolTip="输入要脱壳的游戏的Appid，或右侧点击查询"/>
+                        <Button Grid.Column="2" Command="{Binding QueryAppIdCommand}"
                                 Padding="16,6" Height="32" FontSize="13" Margin="8,0,0,0"
                                 Content="查询AppID"
                                 ToolTip="用目录名搜索候选游戏并回填"/>
-                        <TextBlock Text="Steam Web API Key（选填）：" FontSize="13" VerticalAlignment="Center" Margin="16,0,0,0"
+                        <TextBlock Grid.Column="3" Text="Steam Web API Key（选填）：" FontSize="13" VerticalAlignment="Center" Margin="16,0,0,0"
                                    Foreground="{DynamicResource TextFillColorSecondaryBrush}"
                                    ToolTip="填了可补全模拟器的成就与库存信息，不填则跳过，不影响破解本身"/>
-                        <TextBox Text="{Binding WebApiKey, UpdateSourceTrigger=PropertyChanged}"
-                                 Padding="8,6" Height="32" FontSize="13" Width="260"
-                                 VerticalContentAlignment="Center"
+                        <TextBox Grid.Column="4" Text="{Binding WebApiKey, UpdateSourceTrigger=PropertyChanged}"
+                                 Padding="8,6" Height="32" FontSize="13" Margin="8,0,0,0"
+                                 VerticalContentAlignment="Center" HorizontalAlignment="Stretch"
                                  ToolTip="填了可补全模拟器的成就与库存信息，不填则跳过，不影响破解本身"/>
-                        <Button Command="{Binding OpenApiKeyPageCommand}"
+                        <Button Grid.Column="5" Command="{Binding OpenApiKeyPageCommand}"
                                 Padding="16,6" Height="32" FontSize="13" Margin="8,0,0,0"
                                 Content="获取"
                                 ToolTip="去 Steam 官方申请 Key"/>
-                    </StackPanel>
+                    </Grid>
                     <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                         <Button Command="{Binding CrackCommand}"
                                 Padding="16,6" Height="36" FontSize="14" Margin="0,0,6,0"

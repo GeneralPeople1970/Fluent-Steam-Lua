@@ -35,7 +35,7 @@ public partial class CrackToolViewModel : ObservableObject, IDisposable
     private bool _isEmuInstalled = true;
 
     [ObservableProperty]
-    private string _emuButtonText = "更新emu";
+    private string _emuButtonText = "更新EMU";
 
     [ObservableProperty]
     private string _emuVersionText = string.Empty;
@@ -96,7 +96,7 @@ public partial class CrackToolViewModel : ObservableObject, IDisposable
         {
             IsEmuInstalled = _crackService.IsEmuInstalled();
             var ver = _crackService.GetEmuVersion();
-            EmuButtonText = IsEmuInstalled ? "更新emu" : "下载EMU";
+            EmuButtonText = IsEmuInstalled ? "更新EMU" : "下载EMU";
             EmuVersionText = IsEmuInstalled && !string.IsNullOrEmpty(ver) ? $"已安装：{ver}" : "未下载";
         }
         catch
